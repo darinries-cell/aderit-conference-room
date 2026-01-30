@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+memory/
+migrate_to_supabase.py
