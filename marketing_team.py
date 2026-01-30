@@ -4,27 +4,19 @@ import streamlit as st
 from datetime import datetime
 import httpx
 
-# ============================================
-# CONFIGURATION
-# ============================================
-
-# Try to load from Streamlit secrets first, then environment
 def get_secret(key):
     try:
         return st.secrets[key]
     except:
         return os.getenv(key)
 
-# Supabase config
 SUPABASE_URL = "https://yntsgehumjnoxferoycy.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InludHNnZWh1bWpub3hmZXJveWN5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTc0MDA0NywiZXhwIjoyMDg1MzE2MDQ3fQ.OCv9jKm_uDBDFDAgcJlljCAL0XJovK_ihrvA0zUr9qM"
 
-# API Keys
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = get_secret("OPENAI_API_KEY")
 GOOGLE_API_KEY = get_secret("GOOGLE_API_KEY")
 
-# Set up clients
 import anthropic
 import openai
 from google import genai
@@ -33,19 +25,16 @@ claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
 
-# Check if Ollama is available (local only)
 OLLAMA_AVAILABLE = False
 try:
     import ollama
     ollama_client = ollama.Client()
-    # Test connection
     ollama_client.list()
     OLLAMA_AVAILABLE = True
 except:
     pass
 
 def supabase_request(method, table, data=None, params=None):
-    """Make a request to Supabase REST API"""
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     headers = {
         "apikey": SUPABASE_KEY,
@@ -63,9 +52,6 @@ def supabase_request(method, table, data=None, params=None):
             response = client.patch(url, headers=headers, json=data, params=params)
         elif method == "DELETE":
             response = client.delete(url, headers=headers, params=params)
-        elif method == "UPSERT":
-            headers["Prefer"] = "resolution=merge-duplicates,return=representation"
-            response = client.post(url, headers=headers, json=data)
         
         if response.status_code >= 400:
             st.error(f"Supabase error: {response.status_code} - {response.text}")
@@ -75,216 +61,96 @@ def supabase_request(method, table, data=None, params=None):
             return response.json()
         return []
 
-# ============================================
-# DEFAULT ROLES
-# ============================================
-
 DEFAULT_ROLES = {
     "positioning_strategist": {
         "name": "Positioning Strategist",
         "emoji": "🎯",
         "category": "Internal - Marketing",
-        "description": """You are the Positioning Strategist on Aderit's marketing advisory team.
-
-BACKGROUND: You've led positioning for enterprise SaaS companies including two successful category-creation plays. You studied under April Dunford and have deep expertise in competitive positioning, narrative strategy, and category design.
-
-YOUR EXPERTISE: Defining "why us" and "why now", category creation, strategic narrative, positioning against competitors.
-
-YOUR STYLE: Strategic, precise with language, obsessed with differentiation. You ask "what are we really selling?" and "why should anyone care?" """
+        "description": "You are the Positioning Strategist. Background: Led positioning for enterprise SaaS including category-creation plays. Studied under April Dunford. Expertise: Why us, why now, category creation, strategic narrative. Style: Strategic, precise, obsessed with differentiation."
     },
     "copywriter": {
         "name": "Copywriter",
         "emoji": "✍️",
         "category": "Internal - Marketing",
-        "description": """You are the Copywriter on Aderit's marketing advisory team.
-
-BACKGROUND: 15 years writing B2B enterprise copy. You've written for Salesforce, Workday, and multiple HR tech startups.
-
-YOUR EXPERTISE: Headlines that stop scrollers, website copy that converts, sales deck language, one-pagers that get forwarded.
-
-YOUR STYLE: Direct, punchy, allergic to jargon. You ask "would a real human say this?" and "can we cut this in half?" """
+        "description": "You are the Copywriter. Background: 15 years B2B enterprise copy for Salesforce, Workday, HR tech startups. Expertise: Headlines, website copy, sales decks, one-pagers. Style: Direct, punchy, allergic to jargon."
     },
     "creative_director": {
         "name": "Creative Director",
         "emoji": "🎨",
         "category": "Internal - Marketing",
-        "description": """You are the Creative Director on Aderit's marketing advisory team.
-
-BACKGROUND: Former creative lead at agencies working with enterprise tech brands. You've rebranded three B2B companies from "boring and technical" to "memorable and human."
-
-YOUR EXPERTISE: Brand voice and personality, emotional resonance in B2B, visual and verbal differentiation.
-
-YOUR STYLE: Creative, sometimes provocative, always pushing for distinctiveness. You hate safe and forgettable."""
+        "description": "You are the Creative Director. Background: Former agency creative lead for enterprise tech brands. Rebranded B2B companies from boring to memorable. Expertise: Brand voice, emotional resonance, differentiation. Style: Creative, provocative, hates forgettable."
     },
     "buyer_researcher": {
         "name": "Buyer Researcher",
         "emoji": "👥",
         "category": "Internal - Marketing",
-        "description": """You are the Buyer Researcher on Aderit's marketing advisory team.
-
-BACKGROUND: Former head of customer research at Gong. You've conducted hundreds of buyer interviews and analyzed thousands of sales calls.
-
-YOUR EXPERTISE: How buyers describe their own pain, the language customers actually use, common objections, what triggers buying decisions.
-
-YOUR STYLE: Grounded, evidence-based, always bringing it back to the customer. You ask "but what does the buyer actually say?" """
+        "description": "You are the Buyer Researcher. Background: Former head of customer research at Gong. Conducted hundreds of buyer interviews. Expertise: Buyer pain language, objections, purchase triggers. Style: Grounded, evidence-based, customer-focused."
     },
     "ceo": {
         "name": "CEO Advisor",
         "emoji": "👔",
         "category": "Internal - Executive",
-        "description": """You are the CEO advisor for Aderit.
-
-BACKGROUND: Founded and sold an HR data integration company for $185M. You've been through the full journey from founding to exit.
-
-YOUR EXPERTISE: Overall strategy, fundraising, M&A positioning, board management, competitive dynamics, exit timing.
-
-YOUR STYLE: Strategic, sees the whole board. "What's the 3-year play?" "Who buys this and why?" """
-    },F
+        "description": "You are the CEO Advisor. Background: Founded and sold HR data integration company for $185M. Expertise: Strategy, fundraising, M&A, board management, exit timing. Style: Strategic, sees whole board."
+    },
     "cro": {
         "name": "CRO Advisor",
         "emoji": "💼",
         "category": "Internal - Executive",
-        "description": """You are the CRO (Chief Revenue Officer) advisor for Aderit.
-
-BACKGROUND: Former VP Sales at Ceridian. Joined at $8M ARR, scaled to $80M+. Built enterprise sales orgs from scratch.
-
-YOUR EXPERTISE: Enterprise sales cycles, hiring sales teams, pricing strategy, procurement navigation.
-
-YOUR STYLE: Direct, numbers-driven. "What's the ARR?" "What's the sales cycle?" """
-    },
-    "cmo": {
-        "name": "CMO Advisor",
-        "emoji": "📣",
-        "category": "Internal - Executive",
-        "description": """You are the CMO (Chief Marketing Officer) advisor for Aderit.
-
-BACKGROUND: Early marketing leader at Segment pre-acquisition. Built the "customer data infrastructure" category from nothing.
-
-YOUR EXPERTISE: Category creation, brand positioning, narrative building, analyst relations, content strategy.
-
-YOUR STYLE: Narrative-focused, creative, sometimes contrarian. "What's the story that makes analysts write about us?" """
-    },
-    "coo": {
-        "name": "COO Advisor",
-        "emoji": "🗂️",
-        "category": "Internal - Executive",
-        "description": """You are the COO (Chief Operating Officer) advisor for Aderit.
-
-YOUR ROLE: Facilitate discussions, synthesize insights, keep operations running smoothly.
-
-YOUR STYLE: Organized, direct, action-oriented. You ask "what's the next action?" and "who owns this?" """
+        "description": "You are the CRO Advisor. Background: Former VP Sales at Ceridian, $8M to $80M+ ARR. Expertise: Enterprise sales, hiring, pricing, procurement. Style: Direct, numbers-driven."
     },
     "chro": {
         "name": "CHRO (Prospect)",
         "emoji": "👩‍💼",
         "category": "Client - Executive",
-        "description": """You are a CHRO (Chief Human Resources Officer) at a Fortune 500 company with 15,000 employees.
-
-YOUR SITUATION: You have 12+ HR systems that don't talk to each other. Your team spends 40% of their time on manual data reconciliation.
-
-YOUR CONCERNS: Integration complexity, change management, proving ROI to the CFO, vendor stability.
-
-YOUR STYLE: Strategic but practical. You've been burned by vendors before. You need real proof, not promises."""
+        "description": "You are a CHRO at Fortune 500, 15K employees. Situation: 12+ disconnected HR systems, 40% time on data reconciliation. Concerns: Integration complexity, change management, ROI proof, vendor stability. Style: Strategic but practical, been burned before."
     },
     "cfo_prospect": {
         "name": "CFO (Prospect)",
         "emoji": "💰",
         "category": "Client - Executive",
-        "description": """You are a CFO at a mid-market company ($500M revenue) evaluating HR technology investments.
-
-YOUR SITUATION: The CHRO wants budget for "HR transformation" but you've seen too many IT projects go over budget.
-
-YOUR CONCERNS: TCO, implementation timeline, productivity gains, contract terms, time to value.
-
-YOUR STYLE: Skeptical, numbers-focused. You ask "what's the payback period?" and "show me the ROI model." """
+        "description": "You are a CFO at $500M company evaluating HR tech. Situation: CHRO wants transformation budget but you've seen IT projects fail. Concerns: TCO, timeline, productivity gains, contract terms. Style: Skeptical, numbers-focused."
     },
     "talent_acquisition_director": {
         "name": "Director of Talent Acquisition",
         "emoji": "🎯",
         "category": "Client - HR Operations",
-        "description": """You are a Director of Talent Acquisition at a fast-growing tech company.
-
-YOUR SITUATION: Your ATS doesn't talk to your HRIS. Candidate data is everywhere. You're drowning in spreadsheets.
-
-YOUR PAIN POINTS: Manual data entry, duplicate records, slow time-to-hire, poor reporting.
-
-YOUR STYLE: Pragmatic, deadline-driven. You need solutions that work NOW."""
+        "description": "You are Director of TA at fast-growing tech company. Situation: ATS and HRIS don't connect, drowning in spreadsheets. Pain: Manual entry, duplicates, slow hiring, poor reporting. Style: Pragmatic, needs solutions NOW."
     },
     "hr_ops_manager": {
         "name": "HR Operations Manager",
         "emoji": "⚙️",
         "category": "Client - HR Operations",
-        "description": """You are an HR Operations Manager at a company with 3,000 employees.
-
-YOUR SITUATION: You're the person who actually has to make the HR systems work together. You spend your days fixing data errors.
-
-YOUR PAIN POINTS: Data inconsistencies, manual reporting, compliance anxiety, audit prep nightmares.
-
-YOUR STYLE: Detail-oriented, cautious about new tools. You ask "what happens to my existing data?" """
+        "description": "You are HR Ops Manager at 3K employee company. Situation: You make HR systems work together, fixing data errors daily. Pain: Inconsistencies, manual reporting, compliance anxiety. Style: Detail-oriented, cautious."
     },
     "it_director": {
         "name": "IT Director",
         "emoji": "💻",
         "category": "Client - IT",
-        "description": """You are an IT Director responsible for enterprise applications.
-
-YOUR SITUATION: HR keeps buying point solutions without consulting you. Now you have 15 HR systems to maintain and secure.
-
-YOUR CONCERNS: Security, compliance, API reliability, SSO support, SLAs.
-
-YOUR STYLE: Technical, risk-averse. You ask "what's the architecture?" and "how does this handle failures?" """
+        "description": "You are IT Director for enterprise apps. Situation: HR bought 15 point solutions without consulting you. Concerns: Security, compliance, APIs, SSO, SLAs. Style: Technical, risk-averse."
     },
     "facilitator": {
         "name": "Facilitator",
         "emoji": "🎤",
         "category": "Internal - Operations",
-        "description": """You are a neutral facilitator for discussions.
-
-YOUR ROLE: Keep discussion productive, summarize key points, identify agreement and disagreement, drive toward conclusions.
-
-YOUR STYLE: Neutral, organized, focused on outcomes."""
+        "description": "You are a neutral facilitator. Role: Keep discussion productive, summarize, identify agreement/disagreement, drive conclusions. Style: Neutral, organized, outcome-focused."
     }
 }
-
-# ============================================
-# DATABASE FUNCTIONS
-# ============================================
 
 @st.cache_data(ttl=5)
 def load_roles_from_db():
     result = supabase_request("GET", "roles", params={"select": "*"})
-    
     if not result:
         for key, role in DEFAULT_ROLES.items():
-            supabase_request("POST", "roles", data={
-                "key": key,
-                "name": role["name"],
-                "emoji": role["emoji"],
-                "category": role["category"],
-                "description": role["description"]
-            })
+            supabase_request("POST", "roles", data={"key": key, "name": role["name"], "emoji": role["emoji"], "category": role["category"], "description": role["description"]})
         result = supabase_request("GET", "roles", params={"select": "*"})
-    
     roles = {}
     for row in (result or []):
-        roles[row["key"]] = {
-            "name": row["name"],
-            "emoji": row["emoji"],
-            "category": row["category"],
-            "description": row["description"]
-        }
+        roles[row["key"]] = {"name": row["name"], "emoji": row["emoji"], "category": row["category"], "description": row["description"]}
     return roles if roles else DEFAULT_ROLES
 
 def save_role_to_db(key, name, emoji, category, description):
-    # Try update first
-    result = supabase_request("PATCH", "roles",
-        data={"name": name, "emoji": emoji, "category": category, "description": description},
-        params={"key": f"eq.{key}"})
-    # If nothing updated, insert
-    if result is not None and len(result) == 0:
-        supabase_request("POST", "roles", data={
-            "key": key, "name": name, "emoji": emoji, "category": category, "description": description
-        })
+    supabase_request("DELETE", "roles", params={"key": f"eq.{key}"})
+    supabase_request("POST", "roles", data={"key": key, "name": name, "emoji": emoji, "category": category, "description": description})
     st.cache_data.clear()
 
 def delete_role_from_db(key):
@@ -297,93 +163,51 @@ def load_room_assignments():
     assignments = {}
     for row in (result or []):
         assignments[row["llm_name"]] = row["role_key"]
-    
     if not assignments:
-        return {
-            "Claude": "positioning_strategist",
-            "ChatGPT": "copywriter",
-            "Gemini": "creative_director",
-            "Claude2": "buyer_researcher"
-        }
+        return {"Claude": "positioning_strategist", "ChatGPT": "copywriter", "Gemini": "creative_director", "Haiku": "buyer_researcher"}
     return assignments
 
 def save_room_assignment(llm_name, role_key):
-    # Try update first
-    result = supabase_request("PATCH", "room_assignments", 
-        data={"role_key": role_key, "updated_at": datetime.now().isoformat()},
-        params={"llm_name": f"eq.{llm_name}"})
-    # If nothing updated, insert
-    if result is not None and len(result) == 0:
-        supabase_request("POST", "room_assignments", data={
-            "llm_name": llm_name,
-            "role_key": role_key,
-            "updated_at": datetime.now().isoformat()
-        })
+    supabase_request("DELETE", "room_assignments", params={"llm_name": f"eq.{llm_name}"})
+    supabase_request("POST", "room_assignments", data={"llm_name": llm_name, "role_key": role_key, "updated_at": datetime.now().isoformat()})
     st.cache_data.clear()
 
 @st.cache_data(ttl=10)
 def load_discussions():
-    result = supabase_request("GET", "discussions", params={
-        "select": "*",
-        "order": "created_at.desc",
-        "limit": "50"
-    })
+    result = supabase_request("GET", "discussions", params={"select": "*", "order": "created_at.desc", "limit": "50"})
     return result or []
 
 def save_discussion(topic, synthesis, key_decisions, participants, keywords, full_log):
-    supabase_request("POST", "discussions", data={
-        "topic": topic,
-        "synthesis": synthesis,
-        "key_decisions": key_decisions,
-        "participants": participants,
-        "keywords": keywords,
-        "full_log": full_log
-    })
+    supabase_request("POST", "discussions", data={"topic": topic, "synthesis": synthesis, "key_decisions": key_decisions, "participants": participants, "keywords": keywords, "full_log": full_log})
     st.cache_data.clear()
 
 def find_relevant_context(question, max_results=3):
     discussions = load_discussions()
     if not discussions:
         return None
-    
     question_keywords = set(extract_keywords(question))
-    
     scored = []
     for d in discussions:
         d_keywords = set(d.get("keywords") or [])
         overlap = len(question_keywords & d_keywords)
         if overlap > 0:
             scored.append((overlap, d))
-    
     scored.sort(key=lambda x: x[0], reverse=True)
     top_results = scored[:max_results]
-    
     if not top_results:
         return None
-    
     context = "## RELEVANT PAST DISCUSSIONS:\n\n"
     for score, d in top_results:
         context += f"### {d['created_at'][:10]} - {d['topic'][:80]}\n"
         context += f"**Participants:** {', '.join(d.get('participants') or ['Unknown'])}\n"
         context += f"**Synthesis:** {(d.get('synthesis') or '')[:600]}\n\n"
-    
     return context
 
 def extract_keywords(text):
-    stopwords = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-                 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-                 'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'to', 'of',
-                 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through',
-                 'and', 'but', 'if', 'or', 'because', 'this', 'that', 'these', 'those',
-                 'what', 'which', 'who', 'we', 'our', 'you', 'your', 'they', 'their',
-                 'it', 'its', 'i', 'my', 'me', 'he', 'she', 'his', 'her', 'him'}
+    stopwords = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'and', 'but', 'if', 'or', 'because', 'this', 'that', 'these', 'those', 'what', 'which', 'who', 'we', 'our', 'you', 'your', 'they', 'their', 'it', 'its', 'i', 'my', 'me', 'he', 'she', 'his', 'her', 'him'}
     words = text.lower().replace('\n', ' ').replace('.', ' ').replace(',', ' ').split()
     keywords = [w for w in words if len(w) > 3 and w not in stopwords]
     return list(set(keywords))[:30]
-
-# ============================================
-# LLM FUNCTIONS
-# ============================================
 
 COMPANY_CONTEXT = """
 COMPANY CONTEXT:
@@ -394,15 +218,12 @@ Founder: Darin Ries
 
 def ask_ollama(prompt, role_description, memory_context=None):
     if not OLLAMA_AVAILABLE:
-        return "[Ollama not available - running in cloud mode]"
+        return "[Ollama not available in cloud mode]"
     context = role_description + "\n" + COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
     try:
-        response = ollama_client.chat(
-            model='qwen2.5:7b',
-            messages=[{'role': 'user', 'content': f"{context}\n\n{prompt}"}]
-        )
+        response = ollama_client.chat(model='qwen2.5:7b', messages=[{'role': 'user', 'content': f"{context}\n\n{prompt}"}])
         return response['message']['content']
     except Exception as e:
         return f"[Ollama error: {str(e)[:100]}]"
@@ -411,34 +232,21 @@ def ask_claude(prompt, role_description, memory_context=None):
     context = role_description + "\n" + COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
-    message = claude_client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}]
-    )
+    message = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=1024, messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}])
     return message.content[0].text
 
 def ask_claude_haiku(prompt, role_description, memory_context=None):
-    """Cheaper/faster Claude for the 4th seat when Ollama unavailable"""
     context = role_description + "\n" + COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
-    message = claude_client.messages.create(
-        model="claude-3-5-haiku-20241022",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}]
-    )
+    message = claude_client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=1024, messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}])
     return message.content[0].text
 
 def ask_chatgpt(prompt, role_description, memory_context=None):
     context = role_description + "\n" + COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
-    response = openai_client.chat.completions.create(
-        model="gpt-4o",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}]
-    )
+    response = openai_client.chat.completions.create(model="gpt-4o", max_tokens=1024, messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}])
     return response.choices[0].message.content
 
 def ask_gemini(prompt, role_description, memory_context=None):
@@ -446,91 +254,50 @@ def ask_gemini(prompt, role_description, memory_context=None):
     if memory_context:
         context += "\n\n" + memory_context
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=f"{context}\n\n{prompt}"
-        )
+        response = gemini_client.models.generate_content(model="gemini-2.0-flash", contents=f"{context}\n\n{prompt}")
         return response.text
     except Exception as e:
         return f"[Gemini unavailable: {str(e)[:100]}]"
 
-# Available LLMs depend on whether Ollama is running
 if OLLAMA_AVAILABLE:
-    LLM_FUNCTIONS = {
-        'Claude': ask_claude,
-        'ChatGPT': ask_chatgpt,
-        'Gemini': ask_gemini,
-        'Ollama': ask_ollama
-    }
+    LLM_FUNCTIONS = {'Claude': ask_claude, 'ChatGPT': ask_chatgpt, 'Gemini': ask_gemini, 'Ollama': ask_ollama}
     LLM_LIST = ['Claude', 'ChatGPT', 'Gemini', 'Ollama']
 else:
-    LLM_FUNCTIONS = {
-        'Claude': ask_claude,
-        'ChatGPT': ask_chatgpt,
-        'Gemini': ask_gemini,
-        'Haiku': ask_claude_haiku
-    }
+    LLM_FUNCTIONS = {'Claude': ask_claude, 'ChatGPT': ask_chatgpt, 'Gemini': ask_gemini, 'Haiku': ask_claude_haiku}
     LLM_LIST = ['Claude', 'ChatGPT', 'Gemini', 'Haiku']
 
-# ============================================
-# STREAMLIT APP
-# ============================================
+st.set_page_config(page_title="Aderit Conference Room", page_icon="🏢", layout="wide")
 
-st.set_page_config(
-    page_title="Aderit Conference Room",
-    page_icon="🏢",
-    layout="wide"
-)
-
-# Refresh button
 col1, col2 = st.columns([6, 1])
 with col2:
     if st.button("🔄 Sync"):
         st.cache_data.clear()
         st.rerun()
 
-# Load data
 roles = load_roles_from_db()
 room_assignments = load_room_assignments()
 discussions = load_discussions()
 
-# ============================================
-# SIDEBAR
-# ============================================
-
 with st.sidebar:
     st.title("🏢 Conference Room")
-    
-    # Show mode
     if OLLAMA_AVAILABLE:
-        st.success("🖥️ Local mode (Ollama available)")
+        st.success("🖥️ Local mode")
     else:
-        st.info("☁️ Cloud mode (using Haiku)")
+        st.info("☁️ Cloud mode")
     
     tab1, tab2, tab3 = st.tabs(["👥 Room", "📚 Roles", "⚙️ Settings"])
     
     with tab1:
         st.markdown("### Who's in the room?")
-        
         role_options = {k: f"{v['emoji']} {v['name']}" for k, v in roles.items()}
         role_keys = list(role_options.keys())
-        
         for llm in LLM_LIST:
             current = room_assignments.get(llm, role_keys[0] if role_keys else None)
             current_idx = role_keys.index(current) if current in role_keys else 0
-            
-            selected = st.selectbox(
-                f"**{llm}**",
-                role_keys,
-                index=current_idx,
-                format_func=lambda x: role_options.get(x, x),
-                key=f"assign_{llm}"
-            )
-            
+            selected = st.selectbox(f"**{llm}**", role_keys, index=current_idx, format_func=lambda x: role_options.get(x, x), key=f"assign_{llm}")
             if selected != room_assignments.get(llm):
                 save_room_assignment(llm, selected)
                 room_assignments[llm] = selected
-        
         st.markdown("---")
         st.markdown("### Current Room:")
         for llm in LLM_LIST:
@@ -540,34 +307,24 @@ with st.sidebar:
     
     with tab2:
         st.markdown("### Roles Library")
-        
         categories = sorted(set(r.get('category', 'Uncategorized') for r in roles.values()))
         selected_category = st.selectbox("Filter:", ["All"] + categories)
-        
         for role_key, role in roles.items():
             if selected_category != "All" and role.get('category') != selected_category:
                 continue
             with st.expander(f"{role.get('emoji', '👤')} {role.get('name', role_key)}"):
                 st.markdown(f"**Category:** {role.get('category', 'Uncategorized')}")
                 st.markdown(f"**Description:**\n{role.get('description', '')[:500]}...")
-                
                 if st.button(f"🗑️ Delete", key=f"del_{role_key}"):
                     delete_role_from_db(role_key)
                     st.rerun()
-        
         st.markdown("---")
         st.markdown("### ➕ Create New Role")
-        
         with st.form("new_role_form"):
             new_name = st.text_input("Role Name:")
             new_emoji = st.text_input("Emoji:", value="👤")
-            new_category = st.selectbox(
-                "Category:",
-                ["Internal - Executive", "Internal - Marketing", "Internal - Operations", 
-                 "Client - Executive", "Client - HR Operations", "Client - IT", "Other"]
-            )
+            new_category = st.selectbox("Category:", ["Internal - Executive", "Internal - Marketing", "Internal - Operations", "Client - Executive", "Client - HR Operations", "Client - IT", "Other"])
             new_description = st.text_area("Description:", height=200)
-            
             if st.form_submit_button("Create Role"):
                 if new_name and new_description:
                     role_key = new_name.lower().replace(" ", "_")
@@ -580,25 +337,15 @@ with st.sidebar:
     with tab3:
         st.markdown("### Settings")
         st.markdown(f"📚 **Memory:** {len(discussions)} past discussions")
-        
         if st.button("🔄 Force Refresh"):
             st.cache_data.clear()
             st.rerun()
 
-# ============================================
-# MAIN AREA
-# ============================================
-
 st.title("🏢 Aderit Conference Room")
-
-room_display = " | ".join([
-    f"{roles.get(room_assignments.get(llm, ''), {}).get('emoji', '👤')} {roles.get(room_assignments.get(llm, ''), {}).get('name', 'Unknown')}"
-    for llm in LLM_LIST
-])
+room_display = " | ".join([f"{roles.get(room_assignments.get(llm, ''), {}).get('emoji', '👤')} {roles.get(room_assignments.get(llm, ''), {}).get('name', 'Unknown')}" for llm in LLM_LIST])
 st.markdown(f"**In the room:** {room_display}")
 st.markdown("---")
 
-# Past discussions
 st.markdown("### 📜 Recent Discussions")
 for d in discussions[:10]:
     with st.expander(f"{d['created_at'][:10]} - {(d.get('topic') or 'Untitled')[:60]}"):
@@ -608,12 +355,10 @@ for d in discussions[:10]:
 
 st.markdown("---")
 
-# Input
 user_input = st.chat_input("What would you like to discuss?")
 
 if user_input:
     st.markdown(f"**🧑 Darin:** {user_input}")
-    
     memory_context = find_relevant_context(user_input)
     if memory_context:
         st.info("📚 Found relevant past discussions")
@@ -622,22 +367,13 @@ if user_input:
     for llm in LLM_LIST:
         role_key = room_assignments.get(llm, "")
         role = roles.get(role_key, {})
-        participants.append({
-            'llm': llm,
-            'role_key': role_key,
-            'name': role.get('name', 'Unknown'),
-            'emoji': role.get('emoji', '👤'),
-            'description': role.get('description', ''),
-            'func': LLM_FUNCTIONS[llm]
-        })
+        participants.append({'llm': llm, 'role_key': role_key, 'name': role.get('name', 'Unknown'), 'emoji': role.get('emoji', '👤'), 'description': role.get('description', ''), 'func': LLM_FUNCTIONS[llm]})
     
     with st.status("🎯 Discussion in progress...", expanded=True) as status:
         discussion_log = ""
-        
         if memory_context:
             discussion_log += "## Referenced Past Discussions\n\n" + memory_context + "\n\n"
         
-        # Round 1
         st.write("**Round 1: Initial Perspectives**")
         r1_prompt = f'Darin says: "{user_input}"\n\nGive your perspective in 2-3 paragraphs.'
         responses_r1 = {}
@@ -648,7 +384,6 @@ if user_input:
         for p in participants:
             discussion_log += f"### {p['emoji']} {p['name']} ({p['llm']})\n{responses_r1[p['llm']]}\n\n"
         
-        # Round 2
         st.write("**Round 2: React & Debate**")
         all_r1 = "\n\n".join([f"{p['name']}: {responses_r1[p['llm']]}" for p in participants])
         r2_prompt = f'Topic: "{user_input}"\n\nRound 1:\n{all_r1}\n\nReact: agreements, pushback, questions.'
@@ -660,7 +395,6 @@ if user_input:
         for p in participants:
             discussion_log += f"### {p['emoji']} {p['name']}\n{responses_r2[p['llm']]}\n\n"
         
-        # Round 3
         st.write("**Round 3: Specific Proposals**")
         all_r2 = "\n\n".join([f"{p['name']}: {responses_r2[p['llm']]}" for p in participants])
         r3_prompt = f'Topic: "{user_input}"\n\nDiscussion:\n{all_r1}\n\n{all_r2}\n\nPropose 2-3 specific ideas.'
@@ -672,7 +406,6 @@ if user_input:
         for p in participants:
             discussion_log += f"### {p['emoji']} {p['name']}\n{responses_r3[p['llm']]}\n\n"
         
-        # Round 4
         st.write("**Round 4: Critique & Refine**")
         all_r3 = "\n\n".join([f"{p['name']}: {responses_r3[p['llm']]}" for p in participants])
         r4_prompt = f'Topic: "{user_input}"\n\nProposals:\n{all_r3}\n\nWhich ideas have merit? Start converging.'
@@ -684,7 +417,6 @@ if user_input:
         for p in participants:
             discussion_log += f"### {p['emoji']} {p['name']}\n{responses_r4[p['llm']]}\n\n"
         
-        # Round 5
         st.write("**Round 5: Final Recommendations**")
         all_r4 = "\n\n".join([f"{p['name']}: {responses_r4[p['llm']]}" for p in participants])
         r5_prompt = f'Topic: "{user_input}"\n\nFull discussion:\n{all_r3}\n\n{all_r4}\n\nFinal recommendation.'
@@ -696,23 +428,16 @@ if user_input:
         for p in participants:
             discussion_log += f"### {p['emoji']} {p['name']}\n{responses_r5[p['llm']]}\n\n"
         
-        # Synthesis
         st.write("**Synthesizing...**")
-        synth_prompt = f'''Topic: "{user_input}"
-
-Final recommendations:
-{chr(10).join([f"{p['name']}: {responses_r5[p['llm']]}" for p in participants])}
-
-Synthesize in 3-4 paragraphs: agreements, tensions, recommendations, next steps.'''
+        synth_prompt = f'Topic: "{user_input}"\n\nFinal recommendations:\n' + "\n".join([f"{p['name']}: {responses_r5[p['llm']]}" for p in participants]) + "\n\nSynthesize in 3-4 paragraphs: agreements, tensions, recommendations, next steps."
         synthesis = ask_claude(synth_prompt, "You are a neutral facilitator summarizing this discussion.", memory_context)
         
         decisions_prompt = f"List 3-5 key decisions as bullet points:\n\n{synthesis}"
         key_decisions = ask_claude(decisions_prompt, "Extract key decisions concisely.", None)
         
-        discussion_log += "## 📋 Synthesis\n\n" + synthesis
-        discussion_log += "\n\n## 🔑 Key Decisions\n\n" + key_decisions
+        discussion_log += "## Synthesis\n\n" + synthesis
+        discussion_log += "\n\n## Key Decisions\n\n" + key_decisions
         
-        # Save
         participant_names = [p['name'] for p in participants]
         keywords = extract_keywords(user_input + " " + synthesis)
         save_discussion(user_input, synthesis, key_decisions, participant_names, keywords, discussion_log)
@@ -721,9 +446,7 @@ Synthesize in 3-4 paragraphs: agreements, tensions, recommendations, next steps.
     
     st.markdown("### 📋 Synthesis")
     st.markdown(synthesis)
-    
     st.markdown("### 🔑 Key Decisions")
     st.markdown(key_decisions)
-    
     with st.expander("📖 View Full Discussion"):
         st.markdown(discussion_log)
