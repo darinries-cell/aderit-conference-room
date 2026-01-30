@@ -139,7 +139,7 @@ BACKGROUND: Founded and sold an HR data integration company for $185M. You've be
 YOUR EXPERTISE: Overall strategy, fundraising, M&A positioning, board management, competitive dynamics, exit timing.
 
 YOUR STYLE: Strategic, sees the whole board. "What's the 3-year play?" "Who buys this and why?" """
-    },
+    },F
     "cro": {
         "name": "CRO Advisor",
         "emoji": "💼",
@@ -276,13 +276,15 @@ def load_roles_from_db():
     return roles if roles else DEFAULT_ROLES
 
 def save_role_to_db(key, name, emoji, category, description):
-    supabase_request("UPSERT", "roles", data={
-        "key": key,
-        "name": name,
-        "emoji": emoji,
-        "category": category,
-        "description": description
-    })
+    # Try update first
+    result = supabase_request("PATCH", "roles",
+        data={"name": name, "emoji": emoji, "category": category, "description": description},
+        params={"key": f"eq.{key}"})
+    # If nothing updated, insert
+    if result is not None and len(result) == 0:
+        supabase_request("POST", "roles", data={
+            "key": key, "name": name, "emoji": emoji, "category": category, "description": description
+        })
     st.cache_data.clear()
 
 def delete_role_from_db(key):
@@ -306,11 +308,17 @@ def load_room_assignments():
     return assignments
 
 def save_room_assignment(llm_name, role_key):
-    supabase_request("UPSERT", "room_assignments", data={
-        "llm_name": llm_name,
-        "role_key": role_key,
-        "updated_at": datetime.now().isoformat()
-    })
+    # Try update first
+    result = supabase_request("PATCH", "room_assignments", 
+        data={"role_key": role_key, "updated_at": datetime.now().isoformat()},
+        params={"llm_name": f"eq.{llm_name}"})
+    # If nothing updated, insert
+    if result is not None and len(result) == 0:
+        supabase_request("POST", "room_assignments", data={
+            "llm_name": llm_name,
+            "role_key": role_key,
+            "updated_at": datetime.now().isoformat()
+        })
     st.cache_data.clear()
 
 @st.cache_data(ttl=10)
