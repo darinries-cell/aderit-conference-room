@@ -63,10 +63,8 @@ def supabase_request(method, table, data=None, params=None):
 # ============================================
 
 def extract_text_from_file(uploaded_file):
-    """Extract text content from uploaded file"""
     file_type = uploaded_file.type
     content = ""
-    
     try:
         if file_type == "text/plain" or uploaded_file.name.endswith('.txt'):
             content = uploaded_file.read().decode('utf-8')
@@ -80,46 +78,75 @@ def extract_text_from_file(uploaded_file):
                 reader = pypdf.PdfReader(uploaded_file)
                 content = "\n".join([page.extract_text() or "" for page in reader.pages])
             except ImportError:
-                content = "[PDF support requires pypdf - install with: pip install pypdf]"
+                content = "[PDF support requires pypdf]"
         elif uploaded_file.name.endswith('.docx'):
             try:
                 import docx
                 doc = docx.Document(uploaded_file)
                 content = "\n".join([para.text for para in doc.paragraphs])
             except ImportError:
-                content = "[DOCX support requires python-docx - install with: pip install python-docx]"
+                content = "[DOCX support requires python-docx]"
         else:
-            # Try to read as text
             try:
                 content = uploaded_file.read().decode('utf-8')
             except:
                 content = f"[Cannot read file type: {file_type}]"
     except Exception as e:
         content = f"[Error reading file: {str(e)[:100]}]"
-    
     return content
 
-def create_download_link(content, filename, link_text):
-    """Create a download link for text content"""
-    b64 = base64.b64encode(content.encode()).decode()
-    return f'<a href="data:text/markdown;base64,{b64}" download="{filename}">{link_text}</a>'
+# ============================================
+# PROJECT MANAGEMENT
+# ============================================
+
+def get_projects():
+    result = supabase_request("GET", "projects", params={"select": "*", "order": "name.asc"})
+    return result or []
+
+def create_project(name, emoji="📁", description=""):
+    result = supabase_request("POST", "projects", data={"name": name, "emoji": emoji, "description": description})
+    if result and len(result) > 0:
+        return result[0]["id"]
+    return None
+
+def update_project(project_id, updates):
+    supabase_request("PATCH", "projects", data=updates, params={"id": f"eq.{project_id}"})
+
+def delete_project(project_id):
+    # First unassign all sessions from this project
+    supabase_request("PATCH", "sessions", data={"project_id": None}, params={"project_id": f"eq.{project_id}"})
+    supabase_request("DELETE", "projects", params={"id": f"eq.{project_id}"})
 
 # ============================================
 # SESSION MANAGEMENT
 # ============================================
 
-def get_sessions():
-    result = supabase_request("GET", "sessions", params={"select": "*", "order": "updated_at.desc", "limit": "50"})
+def get_sessions(project_id=None):
+    params = {"select": "*", "order": "updated_at.desc", "limit": "100"}
+    if project_id:
+        params["project_id"] = f"eq.{project_id}"
+    result = supabase_request("GET", "sessions", params=params)
     return result or []
 
-def create_session(name):
-    result = supabase_request("POST", "sessions", data={"name": name[:100], "status": "active"})
+def get_unassigned_sessions():
+    result = supabase_request("GET", "sessions", params={"select": "*", "order": "updated_at.desc", "project_id": "is.null", "limit": "100"})
+    return result or []
+
+def create_session(name, project_id=None):
+    data = {"name": name[:100], "status": "active"}
+    if project_id:
+        data["project_id"] = project_id
+    result = supabase_request("POST", "sessions", data=data)
     if result and len(result) > 0:
         return result[0]["id"]
     return None
 
 def update_session(session_id, updates):
     supabase_request("PATCH", "sessions", data=updates, params={"id": f"eq.{session_id}"})
+
+def delete_session(session_id):
+    supabase_request("DELETE", "messages", params={"session_id": f"eq.{session_id}"})
+    supabase_request("DELETE", "sessions", params={"id": f"eq.{session_id}"})
 
 def get_messages(session_id):
     result = supabase_request("GET", "messages", params={
@@ -273,6 +300,8 @@ st.set_page_config(page_title="Aderit Conference Room", page_icon="🏢", layout
 
 if "current_session_id" not in st.session_state:
     st.session_state.current_session_id = None
+if "current_project_id" not in st.session_state:
+    st.session_state.current_project_id = None
 if "enabled_llms" not in st.session_state:
     st.session_state.enabled_llms = LLM_LIST.copy()
 if "num_rounds" not in st.session_state:
@@ -292,6 +321,7 @@ room_assignments = load_room_assignments()
 with st.sidebar:
     st.title("🏢 Conference Room")
     
+    # New Chat button
     if st.button("➕ New Chat", use_container_width=True, type="primary"):
         st.session_state.current_session_id = None
         st.session_state.file_context = ""
@@ -302,45 +332,155 @@ with st.sidebar:
     
     # File upload
     st.markdown("### 📎 Upload Context")
-    uploaded_file = st.file_uploader(
-        "Add file for discussion",
-        type=['txt', 'md', 'csv', 'pdf', 'docx'],
-        key="file_uploader",
-        help="Upload a file to provide context for the discussion"
-    )
+    uploaded_file = st.file_uploader("Add file", type=['txt', 'md', 'csv', 'pdf', 'docx'], key="file_uploader", label_visibility="collapsed")
     
     if uploaded_file:
         if uploaded_file.name != st.session_state.uploaded_filename:
-            with st.spinner("Reading file..."):
+            with st.spinner("Reading..."):
                 content = extract_text_from_file(uploaded_file)
                 st.session_state.file_context = content
                 st.session_state.uploaded_filename = uploaded_file.name
-            st.success(f"✓ {uploaded_file.name}")
+            st.success(f"✓ {uploaded_file.name[:20]}")
     
     if st.session_state.file_context:
-        st.caption(f"📄 {st.session_state.uploaded_filename} ({len(st.session_state.file_context)} chars)")
-        if st.button("✕ Clear file", key="clear_file"):
+        st.caption(f"📄 {st.session_state.uploaded_filename[:20]}")
+        if st.button("✕ Clear", key="clear_file"):
             st.session_state.file_context = ""
             st.session_state.uploaded_filename = ""
             st.rerun()
     
     st.markdown("---")
     
-    # Chat history
-    st.markdown("### 💬 Chats")
-    sessions = get_sessions()
+    # Projects and Chats
+    st.markdown("### 📂 Projects")
     
-    for sess in sessions[:20]:
-        sess_name = sess["name"][:25] + "..." if len(sess["name"]) > 25 else sess["name"]
-        is_current = st.session_state.current_session_id == sess["id"]
+    projects = get_projects()
+    
+    # Add project button
+    with st.expander("➕ New Project"):
+        new_proj_name = st.text_input("Name", key="new_proj_name")
+        new_proj_emoji = st.text_input("Emoji", value="📁", key="new_proj_emoji")
+        if st.button("Create Project", key="create_proj"):
+            if new_proj_name:
+                create_project(new_proj_name, new_proj_emoji)
+                st.rerun()
+    
+    # Show projects with their chats
+    for proj in projects:
+        proj_sessions = get_sessions(proj["id"])
+        is_current_proj = st.session_state.current_project_id == proj["id"]
         
-        if st.button(f"{'▶ ' if is_current else ''}{sess_name}", key=f"sess_{sess['id']}", use_container_width=True):
-            st.session_state.current_session_id = sess["id"]
-            st.rerun()
+        with st.expander(f"{proj.get('emoji', '📁')} {proj['name']} ({len(proj_sessions)})", expanded=is_current_proj):
+            # Project actions
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📝", key=f"edit_proj_{proj['id']}", help="Rename"):
+                    st.session_state[f"editing_proj_{proj['id']}"] = True
+            with col2:
+                if st.button("🗑️", key=f"del_proj_{proj['id']}", help="Delete"):
+                    delete_project(proj["id"])
+                    st.rerun()
+            
+            # Edit project name
+            if st.session_state.get(f"editing_proj_{proj['id']}"):
+                new_name = st.text_input("New name", value=proj["name"], key=f"rename_proj_{proj['id']}")
+                if st.button("Save", key=f"save_proj_{proj['id']}"):
+                    update_project(proj["id"], {"name": new_name})
+                    st.session_state[f"editing_proj_{proj['id']}"] = False
+                    st.rerun()
+            
+            # Sessions in this project
+            for sess in proj_sessions:
+                sess_name = sess["name"][:25] + "..." if len(sess["name"]) > 25 else sess["name"]
+                is_current = st.session_state.current_session_id == sess["id"]
+                
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    if st.button(f"{'▶ ' if is_current else ''}{sess_name}", key=f"sess_{sess['id']}", use_container_width=True):
+                        st.session_state.current_session_id = sess["id"]
+                        st.session_state.current_project_id = proj["id"]
+                        st.rerun()
+                with col2:
+                    if st.button("⚙️", key=f"cfg_{sess['id']}"):
+                        st.session_state[f"editing_sess_{sess['id']}"] = True
+                
+                # Edit session
+                if st.session_state.get(f"editing_sess_{sess['id']}"):
+                    new_sess_name = st.text_input("Rename", value=sess["name"], key=f"rename_{sess['id']}")
+                    move_to = st.selectbox("Move to", ["(Unassigned)"] + [p["name"] for p in projects], key=f"move_{sess['id']}")
+                    
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        if st.button("💾", key=f"save_sess_{sess['id']}"):
+                            updates = {"name": new_sess_name}
+                            if move_to == "(Unassigned)":
+                                updates["project_id"] = None
+                            else:
+                                target_proj = next((p for p in projects if p["name"] == move_to), None)
+                                if target_proj:
+                                    updates["project_id"] = target_proj["id"]
+                            update_session(sess["id"], updates)
+                            st.session_state[f"editing_sess_{sess['id']}"] = False
+                            st.rerun()
+                    with c2:
+                        if st.button("❌", key=f"cancel_{sess['id']}"):
+                            st.session_state[f"editing_sess_{sess['id']}"] = False
+                            st.rerun()
+                    with c3:
+                        if st.button("🗑️", key=f"del_sess_{sess['id']}"):
+                            delete_session(sess["id"])
+                            if st.session_state.current_session_id == sess["id"]:
+                                st.session_state.current_session_id = None
+                            st.rerun()
+    
+    # Unassigned chats
+    unassigned = get_unassigned_sessions()
+    if unassigned:
+        with st.expander(f"📋 Unassigned ({len(unassigned)})", expanded=True):
+            for sess in unassigned[:20]:
+                sess_name = sess["name"][:25] + "..." if len(sess["name"]) > 25 else sess["name"]
+                is_current = st.session_state.current_session_id == sess["id"]
+                
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    if st.button(f"{'▶ ' if is_current else ''}{sess_name}", key=f"sess_{sess['id']}", use_container_width=True):
+                        st.session_state.current_session_id = sess["id"]
+                        st.session_state.current_project_id = None
+                        st.rerun()
+                with col2:
+                    if st.button("⚙️", key=f"cfg_{sess['id']}"):
+                        st.session_state[f"editing_sess_{sess['id']}"] = True
+                
+                if st.session_state.get(f"editing_sess_{sess['id']}"):
+                    new_sess_name = st.text_input("Rename", value=sess["name"], key=f"rename_{sess['id']}")
+                    move_to = st.selectbox("Move to", ["(Unassigned)"] + [p["name"] for p in projects], key=f"move_{sess['id']}")
+                    
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        if st.button("💾", key=f"save_sess_{sess['id']}"):
+                            updates = {"name": new_sess_name}
+                            if move_to != "(Unassigned)":
+                                target_proj = next((p for p in projects if p["name"] == move_to), None)
+                                if target_proj:
+                                    updates["project_id"] = target_proj["id"]
+                            update_session(sess["id"], updates)
+                            st.session_state[f"editing_sess_{sess['id']}"] = False
+                            st.rerun()
+                    with c2:
+                        if st.button("❌", key=f"cancel_{sess['id']}"):
+                            st.session_state[f"editing_sess_{sess['id']}"] = False
+                            st.rerun()
+                    with c3:
+                        if st.button("🗑️", key=f"del_sess_{sess['id']}"):
+                            delete_session(sess["id"])
+                            if st.session_state.current_session_id == sess["id"]:
+                                st.session_state.current_session_id = None
+                            st.rerun()
     
     st.markdown("---")
     
-    tab1, tab2, tab3 = st.tabs(["👥 Room", "📚 Roles", "⚙️"])
+    # Tabs for config
+    tab1, tab2, tab3 = st.tabs(["👥", "📚", "⚙️"])
     
     with tab1:
         st.markdown("### Participants")
@@ -363,9 +503,6 @@ with st.sidebar:
                 enabled_llms.append(llm)
         
         st.session_state.enabled_llms = enabled_llms
-        
-        if not enabled_llms:
-            st.warning("Select at least one!")
     
     with tab2:
         st.markdown("### Roles")
@@ -375,7 +512,7 @@ with st.sidebar:
             if selected_category != "All" and role.get('category') != selected_category:
                 continue
             with st.expander(f"{role.get('emoji', '👤')} {role.get('name', role_key)}"):
-                st.caption(role.get('description', '')[:200] + "...")
+                st.caption(role.get('description', '')[:150] + "...")
                 if st.button("🗑️", key=f"del_{role_key}"):
                     delete_role_from_db(role_key)
                     st.rerun()
@@ -384,7 +521,7 @@ with st.sidebar:
             new_name = st.text_input("Name:", key="new_role_name")
             new_emoji = st.text_input("Emoji:", value="👤", key="new_role_emoji")
             new_cat = st.selectbox("Category:", ["Internal - Marketing", "Internal - Executive", "Client - Executive", "Client - HR Operations", "Client - IT", "Other"], key="new_role_cat")
-            new_desc = st.text_area("Description:", key="new_role_desc", height=100)
+            new_desc = st.text_area("Description:", key="new_role_desc", height=80)
             if st.button("Create", key="create_role"):
                 if new_name and new_desc:
                     save_role_to_db(new_name.lower().replace(" ", "_"), new_name, new_emoji, new_cat, new_desc)
@@ -395,9 +532,9 @@ with st.sidebar:
         st.session_state.num_rounds = st.slider("Rounds", 1, 5, st.session_state.num_rounds)
         
         if OLLAMA_AVAILABLE:
-            st.success("🖥️ Local mode")
+            st.success("🖥️ Local")
         else:
-            st.info("☁️ Cloud mode")
+            st.info("☁️ Cloud")
         
         if st.button("🔄 Refresh"):
             st.cache_data.clear()
@@ -437,7 +574,7 @@ if current_session_id:
             st.markdown(f"**🧑 Darin:** {msg['content']}")
             full_discussion += f"## User Question\n\n{msg['content']}\n\n"
         elif msg["role"] == "context":
-            st.info(f"📎 File context provided: {msg.get('persona_name', 'file')}")
+            st.info(f"📎 File context: {msg.get('persona_name', 'file')}")
             full_discussion += f"## File Context\n\n{msg['content'][:500]}...\n\n"
         elif msg["role"] == "participant":
             with st.expander(f"{msg.get('persona_emoji', '👤')} {msg.get('persona_name', 'Unknown')} ({msg.get('llm_name', '?')}) — Round {msg.get('round_num', '?')}", expanded=False):
@@ -455,73 +592,48 @@ if current_session_id:
         elif msg["role"] == "deliverable":
             st.markdown("### 📄 Generated Deliverable")
             st.markdown(msg["content"])
-            # Download button for deliverable
-            st.download_button(
-                "⬇️ Download Deliverable (.md)",
-                msg["content"],
-                file_name=f"deliverable_{msg.get('persona_name', 'output')}.md",
-                mime="text/markdown"
-            )
+            st.download_button("⬇️ Download", msg["content"], file_name=f"{msg.get('persona_name', 'output')}.md", mime="text/markdown")
     
-    # Export buttons if we have content
     if full_discussion:
         st.markdown("---")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
-            st.download_button(
-                "⬇️ Export Discussion",
-                full_discussion,
-                file_name="discussion_export.md",
-                mime="text/markdown"
-            )
+            st.download_button("⬇️ Export Discussion", full_discussion, file_name="discussion.md", mime="text/markdown")
         with col2:
             if synthesis_content:
-                st.download_button(
-                    "⬇️ Export Synthesis",
-                    synthesis_content,
-                    file_name="synthesis.md",
-                    mime="text/markdown"
-                )
+                st.download_button("⬇️ Export Synthesis", synthesis_content, file_name="synthesis.md", mime="text/markdown")
 else:
     st.markdown("### Start a new discussion")
     st.markdown("Type your topic below, or upload a file first for context.")
 
 st.markdown("---")
 
-# Check if this is a "create file" request
 def is_file_request(text):
     keywords = ["create a file", "create a markdown", "generate a file", "write a file", 
                 "create a prompt", "generate a prompt", "make a file", "write a markdown",
                 "create a document", "generate a document", "create the prompt", "write the prompt"]
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in keywords)
+    return any(kw in text.lower() for kw in keywords)
 
-# Input
-user_input = st.chat_input("What would you like to discuss? (Tip: Say 'create a markdown file for...' to generate downloadable output)")
+user_input = st.chat_input("What would you like to discuss?")
 
 if user_input:
     if not enabled_llms:
-        st.error("Select at least one participant in the sidebar.")
+        st.error("Select at least one participant.")
     else:
-        # Create new session if needed
         if not current_session_id:
-            current_session_id = create_session(user_input[:100])
+            current_session_id = create_session(user_input[:100], st.session_state.current_project_id)
             st.session_state.current_session_id = current_session_id
         
-        # Save user message
         add_message(current_session_id, "user", user_input)
         
-        # Save file context if present
         file_context = st.session_state.file_context
         if file_context:
             add_message(current_session_id, "context", file_context[:10000], persona_name=st.session_state.uploaded_filename)
         
-        # Build memory context
         memory_context = ""
         if file_context:
             memory_context = f"## UPLOADED FILE CONTEXT ({st.session_state.uploaded_filename}):\n\n{file_context[:8000]}\n\n"
         
-        # Build participants list
         participants = []
         for llm in enabled_llms:
             role_key = room_assignments.get(llm, "")
@@ -539,9 +651,9 @@ if user_input:
         
         st.markdown(f"**🧑 Darin:** {user_input}")
         if file_context:
-            st.info(f"📎 Using context from: {st.session_state.uploaded_filename}")
+            st.info(f"📎 Using: {st.session_state.uploaded_filename}")
         
-        with st.status(f"🎯 Discussion ({len(participants)} participants, {num_rounds} rounds)...", expanded=True) as status:
+        with st.status(f"🎯 {len(participants)} participants, {num_rounds} rounds...", expanded=True) as status:
             all_responses = {}
             previous_text = ""
             
@@ -566,7 +678,6 @@ if user_input:
                 all_responses[round_num] = responses
                 previous_text = "\n\n".join([f"{p['name']}: {responses[p['llm']]}" for p in participants])
             
-            # Synthesis
             st.write("**Synthesizing...**")
             final_responses = all_responses[num_rounds]
             synth_prompt = f'Topic: "{user_input}"\n\nFinal perspectives:\n' + "\n".join([f"{p['name']}: {final_responses[p['llm']]}" for p in participants]) + "\n\nSynthesize in 3-4 paragraphs: agreements, tensions, recommendations, next steps."
@@ -577,11 +688,8 @@ if user_input:
             key_decisions = ask_claude(decisions_prompt, "Extract key decisions concisely.", None)
             add_message(current_session_id, "decisions", key_decisions)
             
-            # Generate file deliverable if requested
             if wants_file:
-                st.write("**Generating deliverable file...**")
-                
-                # Build comprehensive context for file generation
+                st.write("**Generating deliverable...**")
                 file_gen_prompt = f"""Based on this discussion, create the requested deliverable.
 
 ORIGINAL REQUEST: {user_input}
@@ -592,25 +700,16 @@ DISCUSSION SYNTHESIS:
 KEY DECISIONS:
 {key_decisions}
 
-FULL DISCUSSION CONTEXT:
+FULL DISCUSSION:
 {previous_text[:4000]}
 
-Now create the actual deliverable that was requested. Output ONLY the content of the file - no explanations, no "here is the file", just the actual content that should go in the file.
-
-If this is a prompt for a tool like Lovable, Cursor, or another AI tool, make it comprehensive and detailed.
-If this is documentation, make it well-structured with proper headers.
-If this is copy or content, make it polished and ready to use.
-
-Output the complete file content now:"""
+Create the actual deliverable. Output ONLY the file content - no explanations."""
                 
-                deliverable = ask_claude(file_gen_prompt, "You are an expert at creating professional deliverables. Output only the file content, nothing else.", memory_context)
+                deliverable = ask_claude(file_gen_prompt, "You create professional deliverables. Output only file content.", memory_context)
                 
-                # Determine filename from request
                 filename = "deliverable"
                 if "lovable" in user_input.lower():
                     filename = "lovable_prompt"
-                elif "cursor" in user_input.lower():
-                    filename = "cursor_prompt"
                 elif "website" in user_input.lower():
                     filename = "website_spec"
                 elif "prompt" in user_input.lower():
@@ -627,13 +726,8 @@ Output the complete file content now:"""
         st.markdown(key_decisions)
         
         if wants_file:
-            st.markdown("### 📄 Generated Deliverable")
+            st.markdown("### 📄 Deliverable")
             st.markdown(deliverable)
-            st.download_button(
-                "⬇️ Download Deliverable (.md)",
-                deliverable,
-                file_name=f"{filename}.md",
-                mime="text/markdown"
-            )
+            st.download_button("⬇️ Download", deliverable, file_name=f"{filename}.md", mime="text/markdown")
         
         st.rerun()
