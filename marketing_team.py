@@ -2,7 +2,8 @@ import os
 import streamlit as st
 from datetime import datetime
 import httpx
-import base64
+import json
+import concurrent.futures
 
 def get_secret(key):
     try:
@@ -42,7 +43,7 @@ def supabase_request(method, table, data=None, params=None):
         "Content-Type": "application/json",
         "Prefer": "return=representation"
     }
-    with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=60) as client:
         if method == "GET":
             response = client.get(url, headers=headers, params=params)
         elif method == "POST":
@@ -59,7 +60,7 @@ def supabase_request(method, table, data=None, params=None):
         return []
 
 # ============================================
-# FILE HANDLING
+# FILE / DOCUMENT HANDLING
 # ============================================
 
 def extract_text_from_file(uploaded_file):
@@ -95,6 +96,26 @@ def extract_text_from_file(uploaded_file):
         content = f"[Error reading file: {str(e)[:100]}]"
     return content
 
+def get_documents(session_id):
+    result = supabase_request("GET", "documents", params={
+        "select": "*",
+        "session_id": f"eq.{session_id}",
+        "order": "created_at.asc"
+    })
+    return result or []
+
+def save_document(session_id, name, content, doc_type="output"):
+    result = supabase_request("POST", "documents", data={
+        "session_id": session_id,
+        "name": name,
+        "doc_type": doc_type,
+        "content": content
+    })
+    return result[0] if result else None
+
+def delete_document(doc_id):
+    supabase_request("DELETE", "documents", params={"id": f"eq.{doc_id}"})
+
 # ============================================
 # PROJECT MANAGEMENT
 # ============================================
@@ -113,7 +134,6 @@ def update_project(project_id, updates):
     supabase_request("PATCH", "projects", data=updates, params={"id": f"eq.{project_id}"})
 
 def delete_project(project_id):
-    # First unassign all sessions from this project
     supabase_request("PATCH", "sessions", data={"project_id": None}, params={"project_id": f"eq.{project_id}"})
     supabase_request("DELETE", "projects", params={"id": f"eq.{project_id}"})
 
@@ -132,8 +152,8 @@ def get_unassigned_sessions():
     result = supabase_request("GET", "sessions", params={"select": "*", "order": "updated_at.desc", "project_id": "is.null", "limit": "100"})
     return result or []
 
-def create_session(name, project_id=None):
-    data = {"name": name[:100], "status": "active"}
+def create_session(name, project_id=None, mode="panel", facilitator_llm="Claude"):
+    data = {"name": name[:100], "status": "active", "mode": mode, "facilitator_llm": facilitator_llm}
     if project_id:
         data["project_id"] = project_id
     result = supabase_request("POST", "sessions", data=data)
@@ -145,6 +165,7 @@ def update_session(session_id, updates):
     supabase_request("PATCH", "sessions", data=updates, params={"id": f"eq.{session_id}"})
 
 def delete_session(session_id):
+    supabase_request("DELETE", "documents", params={"session_id": f"eq.{session_id}"})
     supabase_request("DELETE", "messages", params={"session_id": f"eq.{session_id}"})
     supabase_request("DELETE", "sessions", params={"id": f"eq.{session_id}"})
 
@@ -234,10 +255,10 @@ Vision: "AWS of workforce data" - unifying disconnected enterprise HR systems.
 Founder: Darin Ries
 """
 
-def ask_ollama(prompt, role_description, memory_context=None):
+def ask_ollama(prompt, role_description="", memory_context=None):
     if not OLLAMA_AVAILABLE:
         return "[Ollama not available in cloud mode]"
-    context = role_description + "\n" + COMPANY_CONTEXT
+    context = role_description + "\n" + COMPANY_CONTEXT if role_description else COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
     try:
@@ -246,29 +267,29 @@ def ask_ollama(prompt, role_description, memory_context=None):
     except Exception as e:
         return f"[Ollama error: {str(e)[:100]}]"
 
-def ask_claude(prompt, role_description, memory_context=None):
-    context = role_description + "\n" + COMPANY_CONTEXT
+def ask_claude(prompt, role_description="", memory_context=None):
+    context = role_description + "\n" + COMPANY_CONTEXT if role_description else COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
     message = claude_client.messages.create(model="claude-sonnet-4-20250514", max_tokens=4096, messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}])
     return message.content[0].text
 
-def ask_claude_haiku(prompt, role_description, memory_context=None):
-    context = role_description + "\n" + COMPANY_CONTEXT
+def ask_claude_haiku(prompt, role_description="", memory_context=None):
+    context = role_description + "\n" + COMPANY_CONTEXT if role_description else COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
     message = claude_client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=4096, messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}])
     return message.content[0].text
 
-def ask_chatgpt(prompt, role_description, memory_context=None):
-    context = role_description + "\n" + COMPANY_CONTEXT
+def ask_chatgpt(prompt, role_description="", memory_context=None):
+    context = role_description + "\n" + COMPANY_CONTEXT if role_description else COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
     response = openai_client.chat.completions.create(model="gpt-4o", max_tokens=4096, messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}])
     return response.choices[0].message.content
 
-def ask_gemini(prompt, role_description, memory_context=None):
-    context = role_description + "\n" + COMPANY_CONTEXT
+def ask_gemini(prompt, role_description="", memory_context=None):
+    context = role_description + "\n" + COMPANY_CONTEXT if role_description else COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
     try:
@@ -293,6 +314,316 @@ ROUND_PROMPTS = {
 }
 
 # ============================================
+# FACILITATOR MODES
+# ============================================
+
+def run_panel_discussion(user_input, participants, num_rounds, memory_context, session_id, status_container):
+    """Original panel discussion - all LLMs talk in rounds"""
+    all_responses = {}
+    previous_text = ""
+    
+    for round_num in range(1, num_rounds + 1):
+        round_name, prompt_template = ROUND_PROMPTS[round_num]
+        status_container.write(f"**Round {round_num}: {round_name}**")
+        
+        if round_num == 1:
+            prompt = prompt_template.format(question=user_input)
+        else:
+            prompt = prompt_template.format(question=user_input, previous=previous_text)
+        
+        responses = {}
+        for p in participants:
+            status_container.write(f"{p['emoji']} {p['name']}...")
+            response = p['func'](prompt, p['description'], memory_context)
+            responses[p['llm']] = response
+            add_message(session_id, "participant", response, 
+                       llm_name=p['llm'], persona_name=p['name'], 
+                       persona_emoji=p['emoji'], round_num=round_num)
+        
+        all_responses[round_num] = responses
+        previous_text = "\n\n".join([f"{p['name']}: {responses[p['llm']]}" for p in participants])
+    
+    return all_responses, previous_text
+
+def run_conversational_mode(user_input, participants, facilitator_llm, memory_context, session_id, status_container, documents):
+    """Facilitator orchestrates, calling LLMs one at a time"""
+    
+    # Build context about available team members
+    team_info = "AVAILABLE TEAM MEMBERS:\n"
+    for p in participants:
+        team_info += f"- {p['name']} ({p['llm']}): {p['description'][:200]}...\n"
+    
+    # Build document context
+    doc_info = ""
+    if documents:
+        doc_info = "\nAVAILABLE DOCUMENTS:\n"
+        for doc in documents:
+            doc_info += f"- {doc['name']} ({doc['doc_type']}): {doc['content'][:200]}...\n"
+    
+    facilitator_func = LLM_FUNCTIONS[facilitator_llm]
+    conversation_log = []
+    max_turns = 10
+    
+    # Initial facilitator planning
+    plan_prompt = f"""{team_info}{doc_info}
+
+USER REQUEST: {user_input}
+
+You are the facilitator. Analyze this request and plan your approach:
+1. Who should you consult first and why?
+2. What specific question will you ask them?
+
+Respond in this JSON format:
+{{"plan": "your overall plan", "first_call": {{"llm": "LLM name", "question": "specific question to ask"}}}}
+"""
+    
+    status_container.write("**🎯 Facilitator planning...**")
+    plan_response = facilitator_func(plan_prompt, "You are a skilled facilitator orchestrating a team discussion.", memory_context)
+    add_message(session_id, "facilitator", plan_response, llm_name=facilitator_llm, persona_name="Facilitator", persona_emoji="🎯")
+    conversation_log.append(f"Facilitator Plan: {plan_response}")
+    
+    # Try to parse the plan
+    try:
+        # Extract JSON from response
+        import re
+        json_match = re.search(r'\{.*\}', plan_response, re.DOTALL)
+        if json_match:
+            plan_data = json.loads(json_match.group())
+        else:
+            plan_data = {"first_call": {"llm": participants[0]['llm'], "question": user_input}}
+    except:
+        plan_data = {"first_call": {"llm": participants[0]['llm'], "question": user_input}}
+    
+    turn = 0
+    while turn < max_turns:
+        turn += 1
+        
+        # Get the next call from facilitator's plan
+        if turn == 1:
+            next_call = plan_data.get("first_call", {})
+            target_llm = next_call.get("llm", participants[0]['llm'])
+            question = next_call.get("question", user_input)
+        else:
+            # Ask facilitator what to do next
+            next_prompt = f"""CONVERSATION SO FAR:
+{chr(10).join(conversation_log[-6:])}
+
+Based on the responses so far, decide your next action:
+1. Call another team member for input
+2. Ask follow-up to same person
+3. Conclude and synthesize
+
+Respond in JSON:
+{{"action": "call|followup|conclude", "llm": "LLM name if calling", "question": "question to ask", "reason": "why this action"}}
+"""
+            status_container.write("**🎯 Facilitator deciding next step...**")
+            next_response = facilitator_func(next_prompt, "You are a skilled facilitator.", memory_context)
+            
+            try:
+                json_match = re.search(r'\{.*\}', next_response, re.DOTALL)
+                if json_match:
+                    next_data = json.loads(json_match.group())
+                else:
+                    next_data = {"action": "conclude"}
+            except:
+                next_data = {"action": "conclude"}
+            
+            if next_data.get("action") == "conclude":
+                status_container.write("**🎯 Facilitator concluding...**")
+                break
+            
+            target_llm = next_data.get("llm", participants[0]['llm'])
+            question = next_data.get("question", "Please provide your thoughts.")
+            conversation_log.append(f"Facilitator: {next_data.get('reason', 'Continuing discussion')}")
+        
+        # Find the participant
+        target_participant = next((p for p in participants if p['llm'] == target_llm), participants[0])
+        
+        status_container.write(f"**{target_participant['emoji']} Asking {target_participant['name']}...**")
+        
+        # Call the target LLM
+        full_question = f"Context: {user_input}\n\nQuestion from facilitator: {question}"
+        response = target_participant['func'](full_question, target_participant['description'], memory_context)
+        
+        add_message(session_id, "participant", response, 
+                   llm_name=target_participant['llm'], persona_name=target_participant['name'], 
+                   persona_emoji=target_participant['emoji'], round_num=turn)
+        
+        conversation_log.append(f"{target_participant['name']}: {response}")
+        
+        # Quality check
+        quality_prompt = f"""The {target_participant['name']} responded:
+{response[:1000]}
+
+Is this response:
+1. HIGH QUALITY - useful, on-topic, actionable
+2. NEEDS RETRY - unclear, off-topic, or insufficient
+
+Respond with just "HIGH QUALITY" or "NEEDS RETRY: reason"
+"""
+        quality_check = facilitator_func(quality_prompt, "You evaluate response quality.", None)
+        
+        if "NEEDS RETRY" in quality_check and turn < max_turns - 1:
+            status_container.write(f"**🔄 Facilitator requesting revision...**")
+            retry_prompt = f"Your previous response needs improvement. {quality_check}\n\nOriginal question: {question}\n\nPlease try again with more detail and clarity."
+            response = target_participant['func'](retry_prompt, target_participant['description'], memory_context)
+            add_message(session_id, "participant", f"[Revised] {response}", 
+                       llm_name=target_participant['llm'], persona_name=target_participant['name'], 
+                       persona_emoji=target_participant['emoji'], round_num=turn)
+            conversation_log[-1] = f"{target_participant['name']} (revised): {response}"
+    
+    return conversation_log
+
+def run_dispatcher_mode(user_input, participants, facilitator_llm, memory_context, session_id, status_container, documents, file_content=None):
+    """Facilitator breaks work into chunks and dispatches in parallel"""
+    
+    facilitator_func = LLM_FUNCTIONS[facilitator_llm]
+    
+    # Build context about available team members
+    team_info = "AVAILABLE WORKERS:\n"
+    for p in participants:
+        team_info += f"- {p['name']} ({p['llm']})\n"
+    
+    # Check if we have CSV/spreadsheet data
+    is_spreadsheet = file_content and (',' in file_content[:500] or '\t' in file_content[:500])
+    
+    if is_spreadsheet:
+        # Parse rows for distribution
+        lines = file_content.strip().split('\n')
+        header = lines[0] if lines else ""
+        data_rows = lines[1:] if len(lines) > 1 else []
+        
+        dispatch_prompt = f"""{team_info}
+
+USER REQUEST: {user_input}
+
+SPREADSHEET DATA:
+- Header: {header}
+- Total rows: {len(data_rows)}
+
+Divide this work among the available workers. Assign roughly equal chunks.
+
+Respond in JSON format:
+{{"tasks": [
+    {{"llm": "LLM name", "start_row": 0, "end_row": 25, "instruction": "specific instruction"}},
+    ...
+]}}
+"""
+    else:
+        dispatch_prompt = f"""{team_info}
+
+USER REQUEST: {user_input}
+
+CONTEXT:
+{memory_context[:2000] if memory_context else 'No additional context'}
+
+Break this work into parallel tasks for the available workers. Each worker should get a distinct piece of work.
+
+Respond in JSON format:
+{{"tasks": [
+    {{"llm": "LLM name", "task": "specific task description"}},
+    ...
+], "merge_instruction": "how to combine results"}}
+"""
+    
+    status_container.write("**🎯 Facilitator planning work distribution...**")
+    dispatch_response = facilitator_func(dispatch_prompt, "You are a skilled work dispatcher.", None)
+    add_message(session_id, "facilitator", dispatch_response, llm_name=facilitator_llm, persona_name="Dispatcher", persona_emoji="🎯")
+    
+    # Parse dispatch plan
+    try:
+        import re
+        json_match = re.search(r'\{.*\}', dispatch_response, re.DOTALL)
+        if json_match:
+            dispatch_plan = json.loads(json_match.group())
+        else:
+            # Fallback: distribute evenly
+            dispatch_plan = {"tasks": [{"llm": p['llm'], "task": user_input} for p in participants]}
+    except:
+        dispatch_plan = {"tasks": [{"llm": p['llm'], "task": user_input} for p in participants]}
+    
+    tasks = dispatch_plan.get("tasks", [])
+    merge_instruction = dispatch_plan.get("merge_instruction", "Combine all results into a single coherent output.")
+    
+    status_container.write(f"**📤 Dispatching {len(tasks)} tasks in parallel...**")
+    
+    results = []
+    
+    # Execute tasks (could be parallel with ThreadPoolExecutor, but keeping simple for now)
+    for i, task in enumerate(tasks):
+        target_llm = task.get("llm", participants[0]['llm'])
+        target_participant = next((p for p in participants if p['llm'] == target_llm), participants[0])
+        
+        if is_spreadsheet and "start_row" in task:
+            # Spreadsheet task
+            start = task.get("start_row", 0)
+            end = task.get("end_row", len(data_rows))
+            chunk_rows = data_rows[start:end]
+            chunk_data = header + "\n" + "\n".join(chunk_rows)
+            
+            task_prompt = f"""TASK: {task.get('instruction', user_input)}
+
+DATA (rows {start+1} to {end}):
+{chunk_data}
+
+Process this data according to the instruction. Output your results clearly."""
+        else:
+            task_prompt = f"""TASK: {task.get('task', user_input)}
+
+{memory_context if memory_context else ''}
+
+Complete this task thoroughly."""
+        
+        status_container.write(f"**{target_participant['emoji']} {target_participant['name']} working...**")
+        
+        response = target_participant['func'](task_prompt, target_participant['description'], None)
+        
+        add_message(session_id, "participant", response, 
+                   llm_name=target_participant['llm'], persona_name=target_participant['name'], 
+                   persona_emoji=target_participant['emoji'], round_num=i+1,
+                   message_type="dispatch_result")
+        
+        results.append({
+            "llm": target_llm,
+            "name": target_participant['name'],
+            "result": response
+        })
+        
+        # Quality check with retry
+        quality_prompt = f"""Task result from {target_participant['name']}:
+{response[:1000]}
+
+Is this HIGH QUALITY or NEEDS RETRY?"""
+        
+        quality_check = facilitator_func(quality_prompt, "You evaluate work quality.", None)
+        
+        if "NEEDS RETRY" in quality_check:
+            status_container.write(f"**🔄 Retrying {target_participant['name']}'s task...**")
+            response = target_participant['func'](task_prompt + "\n\nPrevious attempt was insufficient. Please be more thorough.", target_participant['description'], None)
+            results[-1]["result"] = response
+            add_message(session_id, "participant", f"[Revised] {response}", 
+                       llm_name=target_participant['llm'], persona_name=target_participant['name'], 
+                       persona_emoji=target_participant['emoji'], round_num=i+1)
+    
+    # Merge results
+    status_container.write("**🎯 Facilitator merging results...**")
+    
+    merge_prompt = f"""ORIGINAL REQUEST: {user_input}
+
+MERGE INSTRUCTION: {merge_instruction}
+
+RESULTS FROM WORKERS:
+"""
+    for r in results:
+        merge_prompt += f"\n--- {r['name']} ---\n{r['result']}\n"
+    
+    merge_prompt += "\n\nCombine these results into a single coherent output. If the user requested separate files, note that. Otherwise merge into one."
+    
+    merged_result = facilitator_func(merge_prompt, "You merge work results.", None)
+    
+    return results, merged_result
+
+# ============================================
 # PAGE CONFIG
 # ============================================
 
@@ -310,6 +641,10 @@ if "file_context" not in st.session_state:
     st.session_state.file_context = ""
 if "uploaded_filename" not in st.session_state:
     st.session_state.uploaded_filename = ""
+if "discussion_mode" not in st.session_state:
+    st.session_state.discussion_mode = "panel"
+if "facilitator_llm" not in st.session_state:
+    st.session_state.facilitator_llm = "Claude"
 
 roles = load_roles_from_db()
 room_assignments = load_room_assignments()
@@ -321,7 +656,6 @@ room_assignments = load_room_assignments()
 with st.sidebar:
     st.title("🏢 Conference Room")
     
-    # New Chat button
     if st.button("➕ New Chat", use_container_width=True, type="primary"):
         st.session_state.current_session_id = None
         st.session_state.file_context = ""
@@ -330,8 +664,30 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # Discussion Mode
+    st.markdown("### 🎛️ Mode")
+    st.session_state.discussion_mode = st.radio(
+        "Discussion Mode",
+        ["panel", "conversational", "dispatcher"],
+        format_func=lambda x: {"panel": "👥 Panel Discussion", "conversational": "💬 Conversational", "dispatcher": "📤 Dispatcher"}[x],
+        index=["panel", "conversational", "dispatcher"].index(st.session_state.discussion_mode),
+        label_visibility="collapsed"
+    )
+    
+    if st.session_state.discussion_mode != "panel":
+        st.session_state.facilitator_llm = st.selectbox(
+            "Facilitator",
+            LLM_LIST,
+            index=LLM_LIST.index(st.session_state.facilitator_llm) if st.session_state.facilitator_llm in LLM_LIST else 0
+        )
+    
+    if st.session_state.discussion_mode == "panel":
+        st.session_state.num_rounds = st.slider("Rounds", 1, 5, st.session_state.num_rounds)
+    
+    st.markdown("---")
+    
     # File upload
-    st.markdown("### 📎 Upload Context")
+    st.markdown("### 📎 Upload")
     uploaded_file = st.file_uploader("Add file", type=['txt', 'md', 'csv', 'pdf', 'docx'], key="file_uploader", label_visibility="collapsed")
     
     if uploaded_file:
@@ -351,135 +707,54 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Projects and Chats
+    # Projects
     st.markdown("### 📂 Projects")
-    
     projects = get_projects()
     
-    # Add project button
     with st.expander("➕ New Project"):
         new_proj_name = st.text_input("Name", key="new_proj_name")
         new_proj_emoji = st.text_input("Emoji", value="📁", key="new_proj_emoji")
-        if st.button("Create Project", key="create_proj"):
+        if st.button("Create", key="create_proj"):
             if new_proj_name:
                 create_project(new_proj_name, new_proj_emoji)
                 st.rerun()
     
-    # Show projects with their chats
     for proj in projects:
         proj_sessions = get_sessions(proj["id"])
         is_current_proj = st.session_state.current_project_id == proj["id"]
         
         with st.expander(f"{proj.get('emoji', '📁')} {proj['name']} ({len(proj_sessions)})", expanded=is_current_proj):
-            # Project actions
             col1, col2 = st.columns(2)
-            with col1:
-                if st.button("📝", key=f"edit_proj_{proj['id']}", help="Rename"):
-                    st.session_state[f"editing_proj_{proj['id']}"] = True
             with col2:
-                if st.button("🗑️", key=f"del_proj_{proj['id']}", help="Delete"):
+                if st.button("🗑️", key=f"del_proj_{proj['id']}"):
                     delete_project(proj["id"])
                     st.rerun()
             
-            # Edit project name
-            if st.session_state.get(f"editing_proj_{proj['id']}"):
-                new_name = st.text_input("New name", value=proj["name"], key=f"rename_proj_{proj['id']}")
-                if st.button("Save", key=f"save_proj_{proj['id']}"):
-                    update_project(proj["id"], {"name": new_name})
-                    st.session_state[f"editing_proj_{proj['id']}"] = False
-                    st.rerun()
-            
-            # Sessions in this project
             for sess in proj_sessions:
-                sess_name = sess["name"][:25] + "..." if len(sess["name"]) > 25 else sess["name"]
+                sess_name = sess["name"][:22] + "..." if len(sess["name"]) > 22 else sess["name"]
                 is_current = st.session_state.current_session_id == sess["id"]
                 
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    if st.button(f"{'▶ ' if is_current else ''}{sess_name}", key=f"sess_{sess['id']}", use_container_width=True):
-                        st.session_state.current_session_id = sess["id"]
-                        st.session_state.current_project_id = proj["id"]
-                        st.rerun()
-                with col2:
-                    if st.button("⚙️", key=f"cfg_{sess['id']}"):
-                        st.session_state[f"editing_sess_{sess['id']}"] = True
-                
-                # Edit session
-                if st.session_state.get(f"editing_sess_{sess['id']}"):
-                    new_sess_name = st.text_input("Rename", value=sess["name"], key=f"rename_{sess['id']}")
-                    move_to = st.selectbox("Move to", ["(Unassigned)"] + [p["name"] for p in projects], key=f"move_{sess['id']}")
-                    
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        if st.button("💾", key=f"save_sess_{sess['id']}"):
-                            updates = {"name": new_sess_name}
-                            if move_to == "(Unassigned)":
-                                updates["project_id"] = None
-                            else:
-                                target_proj = next((p for p in projects if p["name"] == move_to), None)
-                                if target_proj:
-                                    updates["project_id"] = target_proj["id"]
-                            update_session(sess["id"], updates)
-                            st.session_state[f"editing_sess_{sess['id']}"] = False
-                            st.rerun()
-                    with c2:
-                        if st.button("❌", key=f"cancel_{sess['id']}"):
-                            st.session_state[f"editing_sess_{sess['id']}"] = False
-                            st.rerun()
-                    with c3:
-                        if st.button("🗑️", key=f"del_sess_{sess['id']}"):
-                            delete_session(sess["id"])
-                            if st.session_state.current_session_id == sess["id"]:
-                                st.session_state.current_session_id = None
-                            st.rerun()
+                if st.button(f"{'▶ ' if is_current else ''}{sess_name}", key=f"sess_{sess['id']}", use_container_width=True):
+                    st.session_state.current_session_id = sess["id"]
+                    st.session_state.current_project_id = proj["id"]
+                    st.rerun()
     
-    # Unassigned chats
+    # Unassigned
     unassigned = get_unassigned_sessions()
     if unassigned:
         with st.expander(f"📋 Unassigned ({len(unassigned)})", expanded=True):
-            for sess in unassigned[:20]:
-                sess_name = sess["name"][:25] + "..." if len(sess["name"]) > 25 else sess["name"]
+            for sess in unassigned[:15]:
+                sess_name = sess["name"][:22] + "..." if len(sess["name"]) > 22 else sess["name"]
                 is_current = st.session_state.current_session_id == sess["id"]
                 
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    if st.button(f"{'▶ ' if is_current else ''}{sess_name}", key=f"sess_{sess['id']}", use_container_width=True):
-                        st.session_state.current_session_id = sess["id"]
-                        st.session_state.current_project_id = None
-                        st.rerun()
-                with col2:
-                    if st.button("⚙️", key=f"cfg_{sess['id']}"):
-                        st.session_state[f"editing_sess_{sess['id']}"] = True
-                
-                if st.session_state.get(f"editing_sess_{sess['id']}"):
-                    new_sess_name = st.text_input("Rename", value=sess["name"], key=f"rename_{sess['id']}")
-                    move_to = st.selectbox("Move to", ["(Unassigned)"] + [p["name"] for p in projects], key=f"move_{sess['id']}")
-                    
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        if st.button("💾", key=f"save_sess_{sess['id']}"):
-                            updates = {"name": new_sess_name}
-                            if move_to != "(Unassigned)":
-                                target_proj = next((p for p in projects if p["name"] == move_to), None)
-                                if target_proj:
-                                    updates["project_id"] = target_proj["id"]
-                            update_session(sess["id"], updates)
-                            st.session_state[f"editing_sess_{sess['id']}"] = False
-                            st.rerun()
-                    with c2:
-                        if st.button("❌", key=f"cancel_{sess['id']}"):
-                            st.session_state[f"editing_sess_{sess['id']}"] = False
-                            st.rerun()
-                    with c3:
-                        if st.button("🗑️", key=f"del_sess_{sess['id']}"):
-                            delete_session(sess["id"])
-                            if st.session_state.current_session_id == sess["id"]:
-                                st.session_state.current_session_id = None
-                            st.rerun()
+                if st.button(f"{'▶ ' if is_current else ''}{sess_name}", key=f"sess_{sess['id']}", use_container_width=True):
+                    st.session_state.current_session_id = sess["id"]
+                    st.session_state.current_project_id = None
+                    st.rerun()
     
     st.markdown("---")
     
-    # Tabs for config
+    # Participants tab
     tab1, tab2, tab3 = st.tabs(["👥", "📚", "⚙️"])
     
     with tab1:
@@ -506,31 +781,12 @@ with st.sidebar:
     
     with tab2:
         st.markdown("### Roles")
-        categories = sorted(set(r.get('category', 'Uncategorized') for r in roles.values()))
-        selected_category = st.selectbox("Filter:", ["All"] + categories, key="role_filter")
-        for role_key, role in roles.items():
-            if selected_category != "All" and role.get('category') != selected_category:
-                continue
-            with st.expander(f"{role.get('emoji', '👤')} {role.get('name', role_key)}"):
-                st.caption(role.get('description', '')[:150] + "...")
-                if st.button("🗑️", key=f"del_{role_key}"):
-                    delete_role_from_db(role_key)
-                    st.rerun()
-        
-        with st.expander("➕ New Role"):
-            new_name = st.text_input("Name:", key="new_role_name")
-            new_emoji = st.text_input("Emoji:", value="👤", key="new_role_emoji")
-            new_cat = st.selectbox("Category:", ["Internal - Marketing", "Internal - Executive", "Client - Executive", "Client - HR Operations", "Client - IT", "Other"], key="new_role_cat")
-            new_desc = st.text_area("Description:", key="new_role_desc", height=80)
-            if st.button("Create", key="create_role"):
-                if new_name and new_desc:
-                    save_role_to_db(new_name.lower().replace(" ", "_"), new_name, new_emoji, new_cat, new_desc)
-                    st.rerun()
+        for role_key, role in list(roles.items())[:8]:
+            with st.expander(f"{role.get('emoji', '👤')} {role.get('name', role_key)[:15]}"):
+                st.caption(role.get('description', '')[:100] + "...")
     
     with tab3:
         st.markdown("### Settings")
-        st.session_state.num_rounds = st.slider("Rounds", 1, 5, st.session_state.num_rounds)
-        
         if OLLAMA_AVAILABLE:
             st.success("🖥️ Local")
         else:
@@ -551,89 +807,122 @@ with col2:
     if st.button("🔄 Sync"):
         st.rerun()
 
+# Show mode and room
 enabled_llms = st.session_state.enabled_llms
+mode_display = {"panel": "👥 Panel", "conversational": "💬 Conversational", "dispatcher": "📤 Dispatcher"}[st.session_state.discussion_mode]
+
 if enabled_llms:
-    room_display = " | ".join([f"{roles.get(room_assignments.get(llm, ''), {}).get('emoji', '👤')} {roles.get(room_assignments.get(llm, ''), {}).get('name', '?')}" for llm in enabled_llms])
-    st.caption(f"**Room:** {room_display} · {st.session_state.num_rounds} rounds")
+    room_display = " | ".join([f"{roles.get(room_assignments.get(llm, ''), {}).get('emoji', '👤')} {roles.get(room_assignments.get(llm, ''), {}).get('name', '?')[:12]}" for llm in enabled_llms])
+    st.caption(f"**Mode:** {mode_display} · **Room:** {room_display}")
 
 if st.session_state.file_context:
-    st.info(f"📎 Context: {st.session_state.uploaded_filename}")
+    st.info(f"📎 {st.session_state.uploaded_filename}")
 
 st.markdown("---")
 
-# Display current session
+# Document repository for current session
 current_session_id = st.session_state.current_session_id
-synthesis_content = ""
-full_discussion = ""
 
 if current_session_id:
+    documents = get_documents(current_session_id)
+    
+    if documents:
+        with st.expander(f"📁 Documents ({len(documents)})", expanded=False):
+            for doc in documents:
+                col1, col2, col3 = st.columns([3, 1, 1])
+                with col1:
+                    st.write(f"{'📥' if doc['doc_type'] == 'input' else '📤'} {doc['name']}")
+                with col2:
+                    st.download_button("⬇️", doc['content'], file_name=doc['name'], key=f"dl_{doc['id']}")
+                with col3:
+                    if st.button("🗑️", key=f"del_doc_{doc['id']}"):
+                        delete_document(doc['id'])
+                        st.rerun()
+    
+    # Display messages
     messages = get_messages(current_session_id)
+    synthesis_content = ""
     
     for msg in messages:
         if msg["role"] == "user":
             st.markdown(f"**🧑 Darin:** {msg['content']}")
-            full_discussion += f"## User Question\n\n{msg['content']}\n\n"
-        elif msg["role"] == "context":
-            st.info(f"📎 File context: {msg.get('persona_name', 'file')}")
-            full_discussion += f"## File Context\n\n{msg['content'][:500]}...\n\n"
-        elif msg["role"] == "participant":
-            with st.expander(f"{msg.get('persona_emoji', '👤')} {msg.get('persona_name', 'Unknown')} ({msg.get('llm_name', '?')}) — Round {msg.get('round_num', '?')}", expanded=False):
+        elif msg["role"] == "facilitator":
+            with st.expander(f"🎯 Facilitator ({msg.get('llm_name', '')})", expanded=False):
                 st.markdown(msg["content"])
-            full_discussion += f"### {msg.get('persona_name', 'Unknown')} (Round {msg.get('round_num', '?')})\n\n{msg['content']}\n\n"
+        elif msg["role"] == "participant":
+            with st.expander(f"{msg.get('persona_emoji', '👤')} {msg.get('persona_name', 'Unknown')} ({msg.get('llm_name', '?')})", expanded=False):
+                st.markdown(msg["content"])
         elif msg["role"] == "synthesis":
             st.markdown("### 📋 Synthesis")
             st.markdown(msg["content"])
             synthesis_content = msg["content"]
-            full_discussion += f"## Synthesis\n\n{msg['content']}\n\n"
         elif msg["role"] == "decisions":
             st.markdown("### 🔑 Key Decisions")
             st.markdown(msg["content"])
-            full_discussion += f"## Key Decisions\n\n{msg['content']}\n\n"
         elif msg["role"] == "deliverable":
-            st.markdown("### 📄 Generated Deliverable")
-            st.markdown(msg["content"])
-            st.download_button("⬇️ Download", msg["content"], file_name=f"{msg.get('persona_name', 'output')}.md", mime="text/markdown")
+            st.markdown(f"### 📄 {msg.get('persona_name', 'Deliverable')}")
+            st.markdown(msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"])
+            st.download_button("⬇️ Download", msg["content"], file_name=f"{msg.get('persona_name', 'output')}.md", key=f"dl_msg_{msg['id']}")
     
-    if full_discussion:
+    if messages:
         st.markdown("---")
-        col1, col2 = st.columns(2)
+        # Session management
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.download_button("⬇️ Export Discussion", full_discussion, file_name="discussion.md", mime="text/markdown")
+            new_name = st.text_input("Rename", value="", placeholder="New name...", key="rename_sess", label_visibility="collapsed")
+            if new_name:
+                update_session(current_session_id, {"name": new_name})
+                st.rerun()
         with col2:
-            if synthesis_content:
-                st.download_button("⬇️ Export Synthesis", synthesis_content, file_name="synthesis.md", mime="text/markdown")
+            move_options = ["(Select project)"] + [p["name"] for p in projects]
+            move_to = st.selectbox("Move", move_options, key="move_sess", label_visibility="collapsed")
+            if move_to != "(Select project)":
+                target_proj = next((p for p in projects if p["name"] == move_to), None)
+                if target_proj:
+                    update_session(current_session_id, {"project_id": target_proj["id"]})
+                    st.rerun()
 else:
+    documents = []
     st.markdown("### Start a new discussion")
-    st.markdown("Type your topic below, or upload a file first for context.")
+    st.markdown(f"**Mode:** {mode_display}")
+    if st.session_state.discussion_mode == "panel":
+        st.caption("All participants discuss in rounds")
+    elif st.session_state.discussion_mode == "conversational":
+        st.caption(f"Facilitator ({st.session_state.facilitator_llm}) orchestrates the conversation")
+    else:
+        st.caption(f"Facilitator ({st.session_state.facilitator_llm}) dispatches work in parallel")
 
 st.markdown("---")
 
-def is_file_request(text):
-    keywords = ["create a file", "create a markdown", "generate a file", "write a file", 
-                "create a prompt", "generate a prompt", "make a file", "write a markdown",
-                "create a document", "generate a document", "create the prompt", "write the prompt"]
-    return any(kw in text.lower() for kw in keywords)
-
+# Input
 user_input = st.chat_input("What would you like to discuss?")
 
 if user_input:
     if not enabled_llms:
         st.error("Select at least one participant.")
     else:
+        # Create session
         if not current_session_id:
-            current_session_id = create_session(user_input[:100], st.session_state.current_project_id)
+            current_session_id = create_session(
+                user_input[:100], 
+                st.session_state.current_project_id,
+                st.session_state.discussion_mode,
+                st.session_state.facilitator_llm
+            )
             st.session_state.current_session_id = current_session_id
         
         add_message(current_session_id, "user", user_input)
         
+        # Save uploaded file as document
         file_context = st.session_state.file_context
         if file_context:
-            add_message(current_session_id, "context", file_context[:10000], persona_name=st.session_state.uploaded_filename)
+            save_document(current_session_id, st.session_state.uploaded_filename, file_context, "input")
         
         memory_context = ""
         if file_context:
-            memory_context = f"## UPLOADED FILE CONTEXT ({st.session_state.uploaded_filename}):\n\n{file_context[:8000]}\n\n"
+            memory_context = f"## UPLOADED FILE ({st.session_state.uploaded_filename}):\n\n{file_context[:8000]}\n\n"
         
+        # Build participants
         participants = []
         for llm in enabled_llms:
             role_key = room_assignments.get(llm, "")
@@ -646,76 +935,62 @@ if user_input:
                 'func': LLM_FUNCTIONS[llm]
             })
         
-        num_rounds = st.session_state.num_rounds
-        wants_file = is_file_request(user_input)
-        
         st.markdown(f"**🧑 Darin:** {user_input}")
-        if file_context:
-            st.info(f"📎 Using: {st.session_state.uploaded_filename}")
         
-        with st.status(f"🎯 {len(participants)} participants, {num_rounds} rounds...", expanded=True) as status:
-            all_responses = {}
-            previous_text = ""
+        mode = st.session_state.discussion_mode
+        
+        with st.status(f"🎯 Running {mode} mode...", expanded=True) as status:
             
-            for round_num in range(1, num_rounds + 1):
-                round_name, prompt_template = ROUND_PROMPTS[round_num]
-                st.write(f"**Round {round_num}: {round_name}**")
+            if mode == "panel":
+                all_responses, previous_text = run_panel_discussion(
+                    user_input, participants, st.session_state.num_rounds, 
+                    memory_context, current_session_id, st
+                )
+                final_responses = all_responses[st.session_state.num_rounds]
                 
-                if round_num == 1:
-                    prompt = prompt_template.format(question=user_input)
-                else:
-                    prompt = prompt_template.format(question=user_input, previous=previous_text)
+            elif mode == "conversational":
+                conversation_log = run_conversational_mode(
+                    user_input, participants, st.session_state.facilitator_llm,
+                    memory_context, current_session_id, st, documents
+                )
+                previous_text = "\n\n".join(conversation_log)
+                final_responses = {p['llm']: "" for p in participants}
                 
-                responses = {}
-                for p in participants:
-                    st.write(f"{p['emoji']} {p['name']}...")
-                    response = p['func'](prompt, p['description'], memory_context)
-                    responses[p['llm']] = response
-                    add_message(current_session_id, "participant", response, 
-                               llm_name=p['llm'], persona_name=p['name'], 
-                               persona_emoji=p['emoji'], round_num=round_num)
+            else:  # dispatcher
+                results, merged_result = run_dispatcher_mode(
+                    user_input, participants, st.session_state.facilitator_llm,
+                    memory_context, current_session_id, st, documents, file_context
+                )
+                previous_text = merged_result
+                final_responses = {r['llm']: r['result'] for r in results}
                 
-                all_responses[round_num] = responses
-                previous_text = "\n\n".join([f"{p['name']}: {responses[p['llm']]}" for p in participants])
+                # Save merged result as document
+                save_document(current_session_id, "merged_output.md", merged_result, "output")
             
+            # Synthesis
             st.write("**Synthesizing...**")
-            final_responses = all_responses[num_rounds]
-            synth_prompt = f'Topic: "{user_input}"\n\nFinal perspectives:\n' + "\n".join([f"{p['name']}: {final_responses[p['llm']]}" for p in participants]) + "\n\nSynthesize in 3-4 paragraphs: agreements, tensions, recommendations, next steps."
-            synthesis = ask_claude(synth_prompt, "You are a neutral facilitator summarizing this discussion.", memory_context)
+            synth_prompt = f'Topic: "{user_input}"\n\nDiscussion:\n{previous_text[:6000]}\n\nSynthesize in 3-4 paragraphs.'
+            synthesis = ask_claude(synth_prompt, "You are a neutral facilitator.", memory_context)
             add_message(current_session_id, "synthesis", synthesis)
             
             decisions_prompt = f"List 3-5 key decisions as bullet points:\n\n{synthesis}"
-            key_decisions = ask_claude(decisions_prompt, "Extract key decisions concisely.", None)
+            key_decisions = ask_claude(decisions_prompt, "Extract key decisions.", None)
             add_message(current_session_id, "decisions", key_decisions)
             
-            if wants_file:
+            # Check for file request
+            if any(kw in user_input.lower() for kw in ["create a file", "create a markdown", "generate a file", "write a file", "create a prompt"]):
                 st.write("**Generating deliverable...**")
-                file_gen_prompt = f"""Based on this discussion, create the requested deliverable.
-
-ORIGINAL REQUEST: {user_input}
-
-DISCUSSION SYNTHESIS:
-{synthesis}
-
-KEY DECISIONS:
-{key_decisions}
-
-FULL DISCUSSION:
-{previous_text[:4000]}
-
-Create the actual deliverable. Output ONLY the file content - no explanations."""
+                file_prompt = f"Based on this discussion:\n{synthesis}\n\nCreate the requested deliverable. Output ONLY the file content."
+                deliverable = ask_claude(file_prompt, "Create professional deliverables.", memory_context)
                 
-                deliverable = ask_claude(file_gen_prompt, "You create professional deliverables. Output only file content.", memory_context)
-                
-                filename = "deliverable"
+                filename = "deliverable.md"
                 if "lovable" in user_input.lower():
-                    filename = "lovable_prompt"
+                    filename = "lovable_prompt.md"
                 elif "website" in user_input.lower():
-                    filename = "website_spec"
-                elif "prompt" in user_input.lower():
-                    filename = "prompt"
+                    filename = "website_spec.md"
                 
                 add_message(current_session_id, "deliverable", deliverable, persona_name=filename)
+                save_document(current_session_id, filename, deliverable, "output")
             
             update_session(current_session_id, {"status": "complete", "updated_at": datetime.now().isoformat()})
             status.update(label="✅ Complete!", state="complete")
@@ -724,10 +999,5 @@ Create the actual deliverable. Output ONLY the file content - no explanations.""
         st.markdown(synthesis)
         st.markdown("### 🔑 Key Decisions")
         st.markdown(key_decisions)
-        
-        if wants_file:
-            st.markdown("### 📄 Deliverable")
-            st.markdown(deliverable)
-            st.download_button("⬇️ Download", deliverable, file_name=f"{filename}.md", mime="text/markdown")
         
         st.rerun()
