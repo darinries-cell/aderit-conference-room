@@ -17,7 +17,7 @@ def get_secret(key):
 
 # Supabase config
 SUPABASE_URL = "https://yntsgehumjnoxferoycy.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InludHNnZWh1bWpub3gmZXJveWN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk3NDAwNDcsImV4cCI6MjA4NTMxNjA0N30.SVk7cRrHzTuPtVj3RxKOJ46x-LIa3iodytYMi63Ibz8"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InludHNnZWh1bWpub3hmZXJveWN5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTc0MDA0NywiZXhwIjoyMDg1MzE2MDQ3fQ.OCv9jKm_uDBDFDAgcJlljCAL0XJovK_ihrvA0zUr9qM"
 
 # API Keys
 ANTHROPIC_API_KEY = get_secret("ANTHROPIC_API_KEY")
