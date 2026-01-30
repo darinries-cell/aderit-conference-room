@@ -266,6 +266,14 @@ else:
     LLM_FUNCTIONS = {'Claude': ask_claude, 'ChatGPT': ask_chatgpt, 'Gemini': ask_gemini, 'Haiku': ask_claude_haiku}
     LLM_LIST = ['Claude', 'ChatGPT', 'Gemini', 'Haiku']
 
+ROUND_PROMPTS = {
+    1: ("Initial Perspectives", 'Darin says: "{question}"\n\nGive your perspective in 2-3 paragraphs.'),
+    2: ("React & Debate", 'Topic: "{question}"\n\nPrevious discussion:\n{previous}\n\nReact: agreements, pushback, questions.'),
+    3: ("Specific Proposals", 'Topic: "{question}"\n\nDiscussion so far:\n{previous}\n\nPropose 2-3 specific ideas.'),
+    4: ("Critique & Refine", 'Topic: "{question}"\n\nProposals:\n{previous}\n\nWhich ideas have merit? Start converging.'),
+    5: ("Final Recommendations", 'Topic: "{question}"\n\nFull discussion:\n{previous}\n\nFinal recommendation.'),
+}
+
 st.set_page_config(page_title="Aderit Conference Room", page_icon="🏢", layout="wide")
 
 col1, col2 = st.columns([6, 1])
@@ -291,16 +299,30 @@ with st.sidebar:
         st.markdown("### Who's in the room?")
         role_options = {k: f"{v['emoji']} {v['name']}" for k, v in roles.items()}
         role_keys = list(role_options.keys())
+        
+        enabled_llms = []
         for llm in LLM_LIST:
-            current = room_assignments.get(llm, role_keys[0] if role_keys else None)
-            current_idx = role_keys.index(current) if current in role_keys else 0
-            selected = st.selectbox(f"**{llm}**", role_keys, index=current_idx, format_func=lambda x: role_options.get(x, x), key=f"assign_{llm}")
-            if selected != room_assignments.get(llm):
-                save_room_assignment(llm, selected)
-                room_assignments[llm] = selected
+            col_check, col_select = st.columns([1, 4])
+            with col_check:
+                enabled = st.checkbox("", value=True, key=f"enable_{llm}", label_visibility="collapsed")
+            with col_select:
+                current = room_assignments.get(llm, role_keys[0] if role_keys else None)
+                current_idx = role_keys.index(current) if current in role_keys else 0
+                selected = st.selectbox(f"**{llm}**", role_keys, index=current_idx, format_func=lambda x: role_options.get(x, x), key=f"assign_{llm}", disabled=not enabled)
+                if selected != room_assignments.get(llm):
+                    save_room_assignment(llm, selected)
+                    room_assignments[llm] = selected
+            if enabled:
+                enabled_llms.append(llm)
+        
+        # Store enabled LLMs in session state
+        st.session_state["enabled_llms"] = enabled_llms
+        
         st.markdown("---")
         st.markdown("### Current Room:")
-        for llm in LLM_LIST:
+        if not enabled_llms:
+            st.warning("Select at least one participant!")
+        for llm in enabled_llms:
             role_key = room_assignments.get(llm, "")
             role = roles.get(role_key, {})
             st.markdown(f"{role.get('emoji', '👤')} **{role.get('name', 'Unknown')}** ({llm})")
@@ -336,14 +358,29 @@ with st.sidebar:
     
     with tab3:
         st.markdown("### Settings")
+        num_rounds = st.slider("Discussion Rounds", min_value=1, max_value=5, value=5, key="num_rounds",
+                               help="1=Quick take, 3=Balanced, 5=Deep debate")
+        st.caption("**1 round:** Quick perspectives only")
+        st.caption("**3 rounds:** Perspectives → Debate → Proposals")
+        st.caption("**5 rounds:** Full debate with refinement")
+        st.markdown("---")
         st.markdown(f"📚 **Memory:** {len(discussions)} past discussions")
         if st.button("🔄 Force Refresh"):
             st.cache_data.clear()
             st.rerun()
 
+# Get enabled LLMs
+enabled_llms = st.session_state.get("enabled_llms", LLM_LIST)
+
 st.title("🏢 Aderit Conference Room")
-room_display = " | ".join([f"{roles.get(room_assignments.get(llm, ''), {}).get('emoji', '👤')} {roles.get(room_assignments.get(llm, ''), {}).get('name', 'Unknown')}" for llm in LLM_LIST])
-st.markdown(f"**In the room:** {room_display}")
+if enabled_llms:
+    room_display = " | ".join([f"{roles.get(room_assignments.get(llm, ''), {}).get('emoji', '👤')} {roles.get(room_assignments.get(llm, ''), {}).get('name', 'Unknown')}" for llm in enabled_llms])
+    st.markdown(f"**In the room:** {room_display}")
+else:
+    st.warning("No participants selected. Check at least one in the sidebar.")
+
+num_rounds = st.session_state.get("num_rounds", 5)
+st.caption(f"📊 {len(enabled_llms)} participant{'s' if len(enabled_llms) != 1 else ''} · {num_rounds} round{'s' if num_rounds > 1 else ''}")
 st.markdown("---")
 
 st.markdown("### 📜 Recent Discussions")
@@ -358,95 +395,72 @@ st.markdown("---")
 user_input = st.chat_input("What would you like to discuss?")
 
 if user_input:
-    st.markdown(f"**🧑 Darin:** {user_input}")
-    memory_context = find_relevant_context(user_input)
-    if memory_context:
-        st.info("📚 Found relevant past discussions")
-    
-    participants = []
-    for llm in LLM_LIST:
-        role_key = room_assignments.get(llm, "")
-        role = roles.get(role_key, {})
-        participants.append({'llm': llm, 'role_key': role_key, 'name': role.get('name', 'Unknown'), 'emoji': role.get('emoji', '👤'), 'description': role.get('description', ''), 'func': LLM_FUNCTIONS[llm]})
-    
-    with st.status("🎯 Discussion in progress...", expanded=True) as status:
-        discussion_log = ""
+    if not enabled_llms:
+        st.error("Please select at least one participant in the sidebar.")
+    else:
+        st.markdown(f"**🧑 Darin:** {user_input}")
+        memory_context = find_relevant_context(user_input)
         if memory_context:
-            discussion_log += "## Referenced Past Discussions\n\n" + memory_context + "\n\n"
+            st.info("📚 Found relevant past discussions")
         
-        st.write("**Round 1: Initial Perspectives**")
-        r1_prompt = f'Darin says: "{user_input}"\n\nGive your perspective in 2-3 paragraphs.'
-        responses_r1 = {}
-        for p in participants:
-            st.write(f"{p['emoji']} {p['name']} thinking...")
-            responses_r1[p['llm']] = p['func'](r1_prompt, p['description'], memory_context)
-        discussion_log += "## Round 1: Initial Perspectives\n\n"
-        for p in participants:
-            discussion_log += f"### {p['emoji']} {p['name']} ({p['llm']})\n{responses_r1[p['llm']]}\n\n"
+        participants = []
+        for llm in enabled_llms:
+            role_key = room_assignments.get(llm, "")
+            role = roles.get(role_key, {})
+            participants.append({'llm': llm, 'role_key': role_key, 'name': role.get('name', 'Unknown'), 'emoji': role.get('emoji', '👤'), 'description': role.get('description', ''), 'func': LLM_FUNCTIONS[llm]})
         
-        st.write("**Round 2: React & Debate**")
-        all_r1 = "\n\n".join([f"{p['name']}: {responses_r1[p['llm']]}" for p in participants])
-        r2_prompt = f'Topic: "{user_input}"\n\nRound 1:\n{all_r1}\n\nReact: agreements, pushback, questions.'
-        responses_r2 = {}
-        for p in participants:
-            st.write(f"{p['emoji']} {p['name']} responding...")
-            responses_r2[p['llm']] = p['func'](r2_prompt, p['description'], memory_context)
-        discussion_log += "## Round 2: React & Debate\n\n"
-        for p in participants:
-            discussion_log += f"### {p['emoji']} {p['name']}\n{responses_r2[p['llm']]}\n\n"
+        num_rounds = st.session_state.get("num_rounds", 5)
         
-        st.write("**Round 3: Specific Proposals**")
-        all_r2 = "\n\n".join([f"{p['name']}: {responses_r2[p['llm']]}" for p in participants])
-        r3_prompt = f'Topic: "{user_input}"\n\nDiscussion:\n{all_r1}\n\n{all_r2}\n\nPropose 2-3 specific ideas.'
-        responses_r3 = {}
-        for p in participants:
-            st.write(f"{p['emoji']} {p['name']} proposing...")
-            responses_r3[p['llm']] = p['func'](r3_prompt, p['description'], memory_context)
-        discussion_log += "## Round 3: Specific Proposals\n\n"
-        for p in participants:
-            discussion_log += f"### {p['emoji']} {p['name']}\n{responses_r3[p['llm']]}\n\n"
+        with st.status(f"🎯 Discussion in progress ({len(participants)} participants, {num_rounds} rounds)...", expanded=True) as status:
+            discussion_log = ""
+            if memory_context:
+                discussion_log += "## Referenced Past Discussions\n\n" + memory_context + "\n\n"
+            
+            all_responses = {}
+            previous_text = ""
+            
+            for round_num in range(1, num_rounds + 1):
+                round_name, prompt_template = ROUND_PROMPTS[round_num]
+                st.write(f"**Round {round_num}: {round_name}**")
+                
+                if round_num == 1:
+                    prompt = prompt_template.format(question=user_input)
+                else:
+                    prompt = prompt_template.format(question=user_input, previous=previous_text)
+                
+                responses = {}
+                for p in participants:
+                    st.write(f"{p['emoji']} {p['name']}...")
+                    responses[p['llm']] = p['func'](prompt, p['description'], memory_context)
+                
+                all_responses[round_num] = responses
+                
+                discussion_log += f"## Round {round_num}: {round_name}\n\n"
+                for p in participants:
+                    discussion_log += f"### {p['emoji']} {p['name']} ({p['llm']})\n{responses[p['llm']]}\n\n"
+                
+                previous_text = "\n\n".join([f"{p['name']}: {responses[p['llm']]}" for p in participants])
+            
+            st.write("**Synthesizing...**")
+            final_responses = all_responses[num_rounds]
+            synth_prompt = f'Topic: "{user_input}"\n\nFinal perspectives:\n' + "\n".join([f"{p['name']}: {final_responses[p['llm']]}" for p in participants]) + "\n\nSynthesize in 3-4 paragraphs: agreements, tensions, recommendations, next steps."
+            synthesis = ask_claude(synth_prompt, "You are a neutral facilitator summarizing this discussion.", memory_context)
+            
+            decisions_prompt = f"List 3-5 key decisions as bullet points:\n\n{synthesis}"
+            key_decisions = ask_claude(decisions_prompt, "Extract key decisions concisely.", None)
+            
+            discussion_log += "## Synthesis\n\n" + synthesis
+            discussion_log += "\n\n## Key Decisions\n\n" + key_decisions
+            
+            participant_names = [p['name'] for p in participants]
+            keywords = extract_keywords(user_input + " " + synthesis)
+            save_discussion(user_input, synthesis, key_decisions, participant_names, keywords, discussion_log)
+            
+            status.update(label="✅ Discussion complete!", state="complete")
         
-        st.write("**Round 4: Critique & Refine**")
-        all_r3 = "\n\n".join([f"{p['name']}: {responses_r3[p['llm']]}" for p in participants])
-        r4_prompt = f'Topic: "{user_input}"\n\nProposals:\n{all_r3}\n\nWhich ideas have merit? Start converging.'
-        responses_r4 = {}
-        for p in participants:
-            st.write(f"{p['emoji']} {p['name']} refining...")
-            responses_r4[p['llm']] = p['func'](r4_prompt, p['description'], memory_context)
-        discussion_log += "## Round 4: Critique & Refine\n\n"
-        for p in participants:
-            discussion_log += f"### {p['emoji']} {p['name']}\n{responses_r4[p['llm']]}\n\n"
-        
-        st.write("**Round 5: Final Recommendations**")
-        all_r4 = "\n\n".join([f"{p['name']}: {responses_r4[p['llm']]}" for p in participants])
-        r5_prompt = f'Topic: "{user_input}"\n\nFull discussion:\n{all_r3}\n\n{all_r4}\n\nFinal recommendation.'
-        responses_r5 = {}
-        for p in participants:
-            st.write(f"{p['emoji']} {p['name']} finalizing...")
-            responses_r5[p['llm']] = p['func'](r5_prompt, p['description'], memory_context)
-        discussion_log += "## Round 5: Final Recommendations\n\n"
-        for p in participants:
-            discussion_log += f"### {p['emoji']} {p['name']}\n{responses_r5[p['llm']]}\n\n"
-        
-        st.write("**Synthesizing...**")
-        synth_prompt = f'Topic: "{user_input}"\n\nFinal recommendations:\n' + "\n".join([f"{p['name']}: {responses_r5[p['llm']]}" for p in participants]) + "\n\nSynthesize in 3-4 paragraphs: agreements, tensions, recommendations, next steps."
-        synthesis = ask_claude(synth_prompt, "You are a neutral facilitator summarizing this discussion.", memory_context)
-        
-        decisions_prompt = f"List 3-5 key decisions as bullet points:\n\n{synthesis}"
-        key_decisions = ask_claude(decisions_prompt, "Extract key decisions concisely.", None)
-        
-        discussion_log += "## Synthesis\n\n" + synthesis
-        discussion_log += "\n\n## Key Decisions\n\n" + key_decisions
-        
-        participant_names = [p['name'] for p in participants]
-        keywords = extract_keywords(user_input + " " + synthesis)
-        save_discussion(user_input, synthesis, key_decisions, participant_names, keywords, discussion_log)
-        
-        status.update(label="✅ Discussion complete!", state="complete")
-    
-    st.markdown("### 📋 Synthesis")
-    st.markdown(synthesis)
-    st.markdown("### 🔑 Key Decisions")
-    st.markdown(key_decisions)
-    with st.expander("📖 View Full Discussion"):
-        st.markdown(discussion_log)
+        st.markdown("### 📋 Synthesis")
+        st.markdown(synthesis)
+        st.markdown("### 🔑 Key Decisions")
+        st.markdown(key_decisions)
+        with st.expander("📖 View Full Discussion"):
+            st.markdown(discussion_log)
