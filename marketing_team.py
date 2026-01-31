@@ -3,6 +3,7 @@ import streamlit as st
 from datetime import datetime
 import httpx
 import json
+import re
 import concurrent.futures
 
 def get_secret(key):
@@ -87,6 +88,21 @@ def extract_text_from_file(uploaded_file):
                 content = "\n".join([para.text for para in doc.paragraphs])
             except ImportError:
                 content = "[DOCX support requires python-docx]"
+        elif uploaded_file.name.endswith('.xlsx'):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(uploaded_file, read_only=True)
+                sheets = []
+                for sheet_name in wb.sheetnames:
+                    ws = wb[sheet_name]
+                    rows = []
+                    for row in ws.iter_rows(values_only=True):
+                        rows.append(",".join([str(c) if c is not None else "" for c in row]))
+                    sheets.append(f"--- Sheet: {sheet_name} ---\n" + "\n".join(rows))
+                content = "\n\n".join(sheets)
+                wb.close()
+            except ImportError:
+                content = "[XLSX support requires openpyxl]"
         else:
             try:
                 content = uploaded_file.read().decode('utf-8')
@@ -278,7 +294,7 @@ def ask_claude_haiku(prompt, role_description="", memory_context=None):
     context = role_description + "\n" + COMPANY_CONTEXT if role_description else COMPANY_CONTEXT
     if memory_context:
         context += "\n\n" + memory_context
-    message = claude_client.messages.create(model="claude-3-5-haiku-20241022", max_tokens=4096, messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}])
+    message = claude_client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=4096, messages=[{"role": "user", "content": f"{context}\n\n{prompt}"}])
     return message.content[0].text
 
 def ask_chatgpt(prompt, role_description="", memory_context=None):
@@ -384,8 +400,6 @@ Respond in this JSON format:
     
     # Try to parse the plan
     try:
-        # Extract JSON from response
-        import re
         json_match = re.search(r'\{.*\}', plan_response, re.DOTALL)
         if json_match:
             plan_data = json.loads(json_match.group())
@@ -532,12 +546,10 @@ Respond in JSON format:
     
     # Parse dispatch plan
     try:
-        import re
         json_match = re.search(r'\{.*\}', dispatch_response, re.DOTALL)
         if json_match:
             dispatch_plan = json.loads(json_match.group())
         else:
-            # Fallback: distribute evenly
             dispatch_plan = {"tasks": [{"llm": p['llm'], "task": user_input} for p in participants]}
     except:
         dispatch_plan = {"tasks": [{"llm": p['llm'], "task": user_input} for p in participants]}
@@ -549,13 +561,11 @@ Respond in JSON format:
     
     results = []
     
-    # Execute tasks (could be parallel with ThreadPoolExecutor, but keeping simple for now)
     for i, task in enumerate(tasks):
         target_llm = task.get("llm", participants[0]['llm'])
         target_participant = next((p for p in participants if p['llm'] == target_llm), participants[0])
         
         if is_spreadsheet and "start_row" in task:
-            # Spreadsheet task
             start = task.get("start_row", 0)
             end = task.get("end_row", len(data_rows))
             chunk_rows = data_rows[start:end]
@@ -686,9 +696,9 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # File upload
+    # File upload - supports xlsx
     st.markdown("### 📎 Upload")
-    uploaded_file = st.file_uploader("Add file", type=['txt', 'md', 'csv', 'pdf', 'docx'], key="file_uploader", label_visibility="collapsed")
+    uploaded_file = st.file_uploader("Add file", type=['txt', 'md', 'csv', 'pdf', 'docx', 'xlsx'], key="file_uploader", label_visibility="collapsed")
     
     if uploaded_file:
         if uploaded_file.name != st.session_state.uploaded_filename:
@@ -766,11 +776,11 @@ with st.sidebar:
         for llm in LLM_LIST:
             col_check, col_select = st.columns([1, 3])
             with col_check:
-                enabled = st.checkbox("", value=llm in st.session_state.enabled_llms, key=f"enable_{llm}", label_visibility="collapsed")
+                enabled = st.checkbox(f"Enable {llm}", value=llm in st.session_state.enabled_llms, key=f"enable_{llm}", label_visibility="collapsed")
             with col_select:
                 current = room_assignments.get(llm, role_keys[0] if role_keys else None)
                 current_idx = role_keys.index(current) if current in role_keys else 0
-                selected = st.selectbox(llm, role_keys, index=current_idx, format_func=lambda x: role_options.get(x, x), key=f"assign_{llm}", disabled=not enabled, label_visibility="collapsed")
+                selected = st.selectbox(f"Role for {llm}", role_keys, index=current_idx, format_func=lambda x: role_options.get(x, x), key=f"assign_{llm}", disabled=not enabled, label_visibility="collapsed")
                 if selected != room_assignments.get(llm):
                     save_room_assignment(llm, selected)
                     room_assignments[llm] = selected
@@ -869,13 +879,13 @@ if current_session_id:
         # Session management
         col1, col2, col3 = st.columns(3)
         with col1:
-            new_name = st.text_input("Rename", value="", placeholder="New name...", key="rename_sess", label_visibility="collapsed")
+            new_name = st.text_input("Rename chat", value="", placeholder="New name...", key="rename_sess", label_visibility="collapsed")
             if new_name:
                 update_session(current_session_id, {"name": new_name})
                 st.rerun()
         with col2:
             move_options = ["(Select project)"] + [p["name"] for p in projects]
-            move_to = st.selectbox("Move", move_options, key="move_sess", label_visibility="collapsed")
+            move_to = st.selectbox("Move to project", move_options, key="move_sess", label_visibility="collapsed")
             if move_to != "(Select project)":
                 target_proj = next((p for p in projects if p["name"] == move_to), None)
                 if target_proj:
