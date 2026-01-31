@@ -112,6 +112,12 @@ def extract_text_from_file(uploaded_file):
         content = f"[Error reading file: {str(e)[:100]}]"
     return content
 
+def get_doc_save_name(original_filename):
+    """Get the right filename for saving to documents. XLSX becomes CSV since we store as text."""
+    if original_filename.endswith('.xlsx'):
+        return original_filename.rsplit('.', 1)[0] + '.csv'
+    return original_filename
+
 def get_documents(session_id):
     result = supabase_request("GET", "documents", params={
         "select": "*",
@@ -873,6 +879,10 @@ if current_session_id:
             st.markdown(f"### 📄 {msg.get('persona_name', 'Deliverable')}")
             st.markdown(msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"])
             st.download_button("⬇️ Download", msg["content"], file_name=f"{msg.get('persona_name', 'output')}.md", key=f"dl_msg_{msg['id']}")
+        elif msg["role"] == "merged_output":
+            st.markdown("### 📤 Merged Output")
+            st.markdown(msg["content"][:2000] + "..." if len(msg["content"]) > 2000 else msg["content"])
+            st.download_button("⬇️ Download Full Output", msg["content"], file_name="merged_output.md", key=f"dl_merged_{msg['id']}", type="primary")
     
     if messages:
         st.markdown("---")
@@ -923,10 +933,11 @@ if user_input:
         
         add_message(current_session_id, "user", user_input)
         
-        # Save uploaded file as document
+        # Save uploaded file as document (xlsx saved as csv)
         file_context = st.session_state.file_context
         if file_context:
-            save_document(current_session_id, st.session_state.uploaded_filename, file_context, "input")
+            doc_name = get_doc_save_name(st.session_state.uploaded_filename)
+            save_document(current_session_id, doc_name, file_context, "input")
         
         memory_context = ""
         if file_context:
@@ -974,8 +985,10 @@ if user_input:
                 previous_text = merged_result
                 final_responses = {r['llm']: r['result'] for r in results}
                 
-                # Save merged result as document
+                # Save merged result as document AND as a visible message
                 save_document(current_session_id, "merged_output.md", merged_result, "output")
+                add_message(current_session_id, "merged_output", merged_result, 
+                           llm_name=st.session_state.facilitator_llm, persona_name="Merged Output", persona_emoji="📤")
             
             # Synthesis
             st.write("**Synthesizing...**")
@@ -1004,6 +1017,12 @@ if user_input:
             
             update_session(current_session_id, {"status": "complete", "updated_at": datetime.now().isoformat()})
             status.update(label="✅ Complete!", state="complete")
+        
+        # Show dispatcher merged output prominently
+        if mode == "dispatcher":
+            st.markdown("### 📤 Merged Output")
+            st.markdown(merged_result[:2000] + "..." if len(merged_result) > 2000 else merged_result)
+            st.download_button("⬇️ Download Full Output", merged_result, file_name="merged_output.md", key="dl_merged_new", type="primary")
         
         st.markdown("### 📋 Synthesis")
         st.markdown(synthesis)
