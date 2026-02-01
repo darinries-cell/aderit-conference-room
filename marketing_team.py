@@ -834,6 +834,37 @@ RESULTS FROM WORKERS:
 
 st.set_page_config(page_title="Aderit Conference Room", page_icon="🏢", layout="wide")
 
+# ============================================
+# AUTHENTICATION
+# ============================================
+
+import hmac
+
+def check_password():
+    """Returns True if the user has entered the correct password."""
+    def password_entered():
+        if hmac.compare_digest(st.session_state["password"], st.secrets["APP_PASSWORD"]):
+            st.session_state["authenticated"] = True
+            del st.session_state["password"]  # Don't keep password in state
+        else:
+            st.session_state["authenticated"] = False
+
+    # Already authenticated
+    if st.session_state.get("authenticated", False):
+        return True
+
+    # Show login screen
+    st.markdown("## 🏢 Aderit Conference Room")
+    st.markdown("---")
+    st.text_input("Password", type="password", on_change=password_entered, key="password", placeholder="Enter password...")
+    if "authenticated" in st.session_state and not st.session_state["authenticated"]:
+        st.error("❌ Incorrect password")
+    st.stop()
+    return False
+
+if not check_password():
+    st.stop()
+
 if "current_session_id" not in st.session_state:
     st.session_state.current_session_id = None
 if "current_project_id" not in st.session_state:
@@ -1004,6 +1035,11 @@ with st.sidebar:
         
         if st.button("🔄 Refresh"):
             st.cache_data.clear()
+            st.rerun()
+        
+        st.markdown("---")
+        if st.button("🔒 Logout", use_container_width=True):
+            st.session_state["authenticated"] = False
             st.rerun()
 
 # ============================================
