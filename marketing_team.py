@@ -1251,8 +1251,8 @@ if st.session_state.uploaded_files:
     st.info(f"📎 {len(st.session_state.uploaded_files)} file(s): {file_names}")
 
 # Show temp_data status if session has chunked data
-if current_session_id:
-    temp_meta = get_temp_metadata(current_session_id)
+if st.session_state.current_session_id:
+    temp_meta = get_temp_metadata(st.session_state.current_session_id)
     if temp_meta:
         for tm in temp_meta:
             st.success(f"📊 **{tm['file_name']}** — {tm['total_rows']} rows stored in DB ({tm['total_chunks']} chunks)")
