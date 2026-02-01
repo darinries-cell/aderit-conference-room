@@ -292,6 +292,141 @@ def _add_formatted_text(para, text):
         else:
             para.add_run(part)
 
+def detect_tabular_content(text):
+    """Check if text contains CSV-like or pipe-table content that should be offered as spreadsheet."""
+    lines = text.strip().split('\n')
+    if len(lines) < 3:
+        return False, None
+    
+    # Check for CSV (comma-separated with consistent column count)
+    csv_lines = [l for l in lines if ',' in l and not l.startswith('#') and not l.startswith('**')]
+    if len(csv_lines) >= 3:
+        col_counts = [len(l.split(',')) for l in csv_lines[:10]]
+        if col_counts and max(col_counts) == min(col_counts) and col_counts[0] >= 2:
+            return True, "csv"
+    
+    # Check for pipe tables
+    pipe_lines = [l for l in lines if l.strip().startswith('|') and l.strip().endswith('|')]
+    if len(pipe_lines) >= 3:
+        return True, "pipe"
+    
+    # Check for tab-separated
+    tab_lines = [l for l in lines if '\t' in l]
+    if len(tab_lines) >= 3:
+        col_counts = [len(l.split('\t')) for l in tab_lines[:10]]
+        if col_counts and max(col_counts) == min(col_counts) and col_counts[0] >= 2:
+            return True, "tsv"
+    
+    return False, None
+
+def extract_tabular_text(text, fmt):
+    """Extract just the tabular portion from text that may contain prose."""
+    lines = text.strip().split('\n')
+    table_lines = []
+    
+    if fmt == "csv":
+        # Find the first CSV-like line and grab consecutive CSV lines
+        in_table = False
+        header_cols = 0
+        for line in lines:
+            if ',' in line and not line.startswith('#') and not line.startswith('**') and not line.startswith('---'):
+                cols = len(line.split(','))
+                if not in_table:
+                    header_cols = cols
+                    in_table = True
+                if in_table and abs(cols - header_cols) <= 1:
+                    table_lines.append(line)
+                elif in_table:
+                    break
+            elif in_table and line.strip() == "":
+                break
+            elif in_table:
+                break
+        return '\n'.join(table_lines)
+    
+    elif fmt == "pipe":
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('|') and stripped.endswith('|'):
+                if not all(c in '-| :' for c in stripped):
+                    table_lines.append(stripped)
+        # Convert pipe table to CSV
+        csv_lines = []
+        for line in table_lines:
+            cells = [c.strip() for c in line.split('|')[1:-1]]
+            csv_lines.append(','.join(cells))
+        return '\n'.join(csv_lines)
+    
+    elif fmt == "tsv":
+        for line in lines:
+            if '\t' in line:
+                table_lines.append(line.replace('\t', ','))
+            elif table_lines and line.strip() == "":
+                break
+        return '\n'.join(table_lines)
+    
+    return text
+
+def create_xlsx_from_csv_text(csv_text, sheet_name="Sheet1"):
+    """Convert CSV text to xlsx bytes using openpyxl."""
+    import io
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError:
+        return None
+    
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    
+    lines = csv_text.strip().split('\n')
+    for row_idx, line in enumerate(lines, 1):
+        cells = line.split(',')
+        for col_idx, cell in enumerate(cells, 1):
+            val = cell.strip().strip('"')
+            # Try to convert to number
+            try:
+                if '.' in val:
+                    val = float(val)
+                else:
+                    val = int(val)
+            except (ValueError, TypeError):
+                pass
+            ws.cell(row=row_idx, column=col_idx, value=val)
+    
+    # Style header row
+    header_fill = PatternFill(start_color="1a1a2e", end_color="1a1a2e", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    thin_border = Border(
+        left=Side(style='thin', color='CCCCCC'),
+        right=Side(style='thin', color='CCCCCC'),
+        top=Side(style='thin', color='CCCCCC'),
+        bottom=Side(style='thin', color='CCCCCC')
+    )
+    
+    if lines:
+        for col_idx in range(1, len(lines[0].split(',')) + 1):
+            cell = ws.cell(row=1, column=col_idx)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center')
+    
+    # Auto-width columns
+    for col in ws.columns:
+        max_length = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            if cell.value:
+                max_length = max(max_length, len(str(cell.value)))
+            cell.border = thin_border
+        ws.column_dimensions[col_letter].width = min(max_length + 4, 40)
+    
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 def get_documents(session_id):
     result = supabase_request("GET", "documents", params={
         "select": "*",
@@ -1298,12 +1433,29 @@ if current_session_id:
             with st.expander(f"{msg.get('persona_emoji', '👤')} {msg.get('persona_name', 'Unknown')} ({msg.get('llm_name', '?')})", expanded=False):
                 st.markdown(msg["content"])
                 safe_name = (msg.get('persona_name', 'output') or 'output').replace(' ', '_').replace('/', '-')
-                col_p1, col_p2 = st.columns(2)
-                with col_p1:
-                    st.download_button("⬇️ .md", msg["content"], file_name=f"{safe_name}.md", key=f"dl_part_md_{msg['id']}")
-                with col_p2:
-                    docx_bytes = create_docx_buffer(msg.get('persona_name', 'Output'), msg["content"])
-                    st.download_button("⬇️ .docx", docx_bytes, file_name=f"{safe_name}.docx", key=f"dl_part_docx_{msg['id']}")
+                
+                is_tabular, tab_fmt = detect_tabular_content(msg["content"])
+                if is_tabular:
+                    csv_text = extract_tabular_text(msg["content"], tab_fmt)
+                    xlsx_bytes = create_xlsx_from_csv_text(csv_text)
+                    col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+                    with col_p1:
+                        st.download_button("⬇️ .csv", csv_text, file_name=f"{safe_name}.csv", key=f"dl_part_csv_{msg['id']}", type="primary")
+                    with col_p2:
+                        if xlsx_bytes:
+                            st.download_button("⬇️ .xlsx", xlsx_bytes, file_name=f"{safe_name}.xlsx", key=f"dl_part_xlsx_{msg['id']}", type="primary")
+                    with col_p3:
+                        st.download_button("⬇️ .md", msg["content"], file_name=f"{safe_name}.md", key=f"dl_part_md_{msg['id']}")
+                    with col_p4:
+                        docx_bytes = create_docx_buffer(msg.get('persona_name', 'Output'), msg["content"])
+                        st.download_button("⬇️ .docx", docx_bytes, file_name=f"{safe_name}.docx", key=f"dl_part_docx_{msg['id']}")
+                else:
+                    col_p1, col_p2 = st.columns(2)
+                    with col_p1:
+                        st.download_button("⬇️ .md", msg["content"], file_name=f"{safe_name}.md", key=f"dl_part_md_{msg['id']}")
+                    with col_p2:
+                        docx_bytes = create_docx_buffer(msg.get('persona_name', 'Output'), msg["content"])
+                        st.download_button("⬇️ .docx", docx_bytes, file_name=f"{safe_name}.docx", key=f"dl_part_docx_{msg['id']}")
         elif msg["role"] == "synthesis":
             st.markdown("### 📋 Synthesis")
             st.markdown(msg["content"])
@@ -1330,15 +1482,55 @@ if current_session_id:
         elif msg["role"] == "merged_output":
             st.markdown("### 📤 Merged Output")
             st.markdown(msg["content"][:2000] + "..." if len(msg["content"]) > 2000 else msg["content"])
-            col_m1, col_m2 = st.columns(2)
-            with col_m1:
-                st.download_button("⬇️ .md", msg["content"], file_name="merged_output.md", key=f"dl_merged_md_{msg['id']}")
-            with col_m2:
-                docx_bytes = create_docx_buffer("Merged Output", msg["content"])
-                st.download_button("⬇️ .docx", docx_bytes, file_name="merged_output.docx", key=f"dl_merged_docx_{msg['id']}", type="primary")
+            
+            is_tabular, tab_fmt = detect_tabular_content(msg["content"])
+            if is_tabular:
+                csv_text = extract_tabular_text(msg["content"], tab_fmt)
+                xlsx_bytes = create_xlsx_from_csv_text(csv_text)
+                col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                with col_m1:
+                    st.download_button("⬇️ .csv", csv_text, file_name="output.csv", key=f"dl_merged_csv_{msg['id']}", type="primary")
+                with col_m2:
+                    if xlsx_bytes:
+                        st.download_button("⬇️ .xlsx", xlsx_bytes, file_name="output.xlsx", key=f"dl_merged_xlsx_{msg['id']}", type="primary")
+                with col_m3:
+                    st.download_button("⬇️ .md", msg["content"], file_name="merged_output.md", key=f"dl_merged_md_{msg['id']}")
+                with col_m4:
+                    docx_bytes = create_docx_buffer("Merged Output", msg["content"])
+                    st.download_button("⬇️ .docx", docx_bytes, file_name="merged_output.docx", key=f"dl_merged_docx_{msg['id']}")
+            else:
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    st.download_button("⬇️ .md", msg["content"], file_name="merged_output.md", key=f"dl_merged_md_{msg['id']}")
+                with col_m2:
+                    docx_bytes = create_docx_buffer("Merged Output", msg["content"])
+                    st.download_button("⬇️ .docx", docx_bytes, file_name="merged_output.docx", key=f"dl_merged_docx_{msg['id']}", type="primary")
     
     if messages:
         st.markdown("---")
+        
+        # Show all output documents prominently
+        all_docs = get_documents(current_session_id)
+        output_docs = [d for d in all_docs if d['doc_type'] == 'output']
+        if output_docs:
+            st.markdown("## 📦 All Outputs")
+            for doc in output_docs:
+                col1, col2, col3, col4 = st.columns([4, 1, 1, 1])
+                with col1:
+                    st.write(f"📤 **{doc['name']}**")
+                with col2:
+                    st.download_button("⬇️ Raw", doc['content'], file_name=doc['name'], key=f"hist_dl_{doc['id']}", use_container_width=True)
+                with col3:
+                    if doc['name'].endswith(('.md', '.txt', '.csv')):
+                        docx_name = doc['name'].rsplit('.', 1)[0] + '.docx'
+                        docx_bytes = create_docx_buffer(doc['name'], doc['content'])
+                        st.download_button("📝 Word", docx_bytes, file_name=docx_name, key=f"hist_docx_{doc['id']}", use_container_width=True)
+                with col4:
+                    if st.button("🗑️", key=f"hist_del_{doc['id']}"):
+                        delete_document(doc['id'])
+                        st.rerun()
+            st.markdown("---")
+        
         # Session management
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -1530,30 +1722,124 @@ if user_input:
             update_session(current_session_id, {"status": "complete", "updated_at": datetime.now().isoformat()})
             status.update(label="✅ Complete!", state="complete")
         
-        # Show dispatcher merged output prominently
-        if mode == "dispatcher":
-            st.markdown("### 📤 Merged Output")
-            st.markdown(merged_result[:2000] + "..." if len(merged_result) > 2000 else merged_result)
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
-                st.download_button("⬇️ Download .md", merged_result, file_name="merged_output.md", key="dl_merged_md_new", type="primary")
-            with col_dl2:
-                docx_bytes = create_docx_buffer("Merged Output", merged_result, subtitle=user_input[:100])
-                st.download_button("⬇️ Download .docx", docx_bytes, file_name="merged_output.docx", key="dl_merged_docx_new", type="secondary")
-        
-        st.markdown("### 📋 Synthesis")
-        st.markdown(synthesis)
-        st.markdown("### 🔑 Key Decisions")
-        st.markdown(key_decisions)
-        
-        # Full report downloads — .md and .docx
+        # ============================================
+        # 📦 ALL OUTPUTS — one place, every file
+        # ============================================
         st.markdown("---")
-        st.markdown("### 📄 Full Report")
-        col_r1, col_r2 = st.columns(2)
-        with col_r1:
-            st.download_button("⬇️ Report (.md)", report_md, file_name="report.md", key="dl_report_md", type="primary")
-        with col_r2:
+        st.markdown("## 📦 All Outputs")
+        
+        # 1. Full Report
+        st.markdown("#### 📄 Full Report")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button("⬇️ report.md", report_md, file_name="report.md", key="out_report_md", type="primary", use_container_width=True)
+        with col2:
             docx_report = create_docx_buffer(user_input[:80], report_md, subtitle="Aderit Conference Room Report")
-            st.download_button("⬇️ Report (.docx)", docx_report, file_name="report.docx", key="dl_report_docx", type="primary")
+            st.download_button("⬇️ report.docx", docx_report, file_name="report.docx", key="out_report_docx", type="primary", use_container_width=True)
+        
+        # 2. Synthesis
+        st.markdown("#### 📋 Synthesis")
+        st.markdown(synthesis)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button("⬇️ synthesis.md", synthesis, file_name="synthesis.md", key="out_synth_md", use_container_width=True)
+        with col2:
+            docx_synth = create_docx_buffer("Synthesis", synthesis)
+            st.download_button("⬇️ synthesis.docx", docx_synth, file_name="synthesis.docx", key="out_synth_docx", use_container_width=True)
+        
+        # 3. Key Decisions
+        st.markdown("#### 🔑 Key Decisions")
+        st.markdown(key_decisions)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button("⬇️ decisions.md", key_decisions, file_name="decisions.md", key="out_dec_md", use_container_width=True)
+        with col2:
+            docx_dec = create_docx_buffer("Key Decisions", key_decisions)
+            st.download_button("⬇️ decisions.docx", docx_dec, file_name="decisions.docx", key="out_dec_docx", use_container_width=True)
+        
+        # 4. Dispatcher merged output
+        if mode == "dispatcher":
+            st.markdown("#### 📤 Merged Output")
+            st.markdown(merged_result[:2000] + "..." if len(merged_result) > 2000 else merged_result)
+            
+            is_tabular, tab_fmt = detect_tabular_content(merged_result)
+            if is_tabular:
+                csv_text = extract_tabular_text(merged_result, tab_fmt)
+                xlsx_bytes = create_xlsx_from_csv_text(csv_text)
+                save_document(current_session_id, "output.csv", csv_text, "output")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.download_button("⬇️ output.csv", csv_text, file_name="output.csv", key="out_merged_csv", type="primary", use_container_width=True)
+                with col2:
+                    if xlsx_bytes:
+                        st.download_button("⬇️ output.xlsx", xlsx_bytes, file_name="output.xlsx", key="out_merged_xlsx", type="primary", use_container_width=True)
+                with col3:
+                    st.download_button("⬇️ merged.md", merged_result, file_name="merged_output.md", key="out_merged_md", use_container_width=True)
+                with col4:
+                    docx_m = create_docx_buffer("Merged Output", merged_result, subtitle=user_input[:100])
+                    st.download_button("⬇️ merged.docx", docx_m, file_name="merged_output.docx", key="out_merged_docx", use_container_width=True)
+            else:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.download_button("⬇️ merged.md", merged_result, file_name="merged_output.md", key="out_merged_md", type="primary", use_container_width=True)
+                with col2:
+                    docx_m = create_docx_buffer("Merged Output", merged_result, subtitle=user_input[:100])
+                    st.download_button("⬇️ merged.docx", docx_m, file_name="merged_output.docx", key="out_merged_docx", type="primary", use_container_width=True)
+        
+        # 5. Individual participant outputs
+        st.markdown("#### 👥 Individual Outputs")
+        for p in participants:
+            if mode == "panel":
+                last_round = st.session_state.num_rounds
+                resp = all_responses.get(last_round, {}).get(p['llm'], '')
+            elif mode == "dispatcher":
+                resp = next((r['result'] for r in results if r['llm'] == p['llm']), '')
+            else:
+                resp = next((entry.split(': ', 1)[1] for entry in conversation_log if entry.startswith(p['name'] + ':')), '')
+            
+            if resp:
+                safe_name = p['name'].replace(' ', '_').replace('/', '-')
+                with st.expander(f"{p['emoji']} {p['name']}", expanded=False):
+                    st.markdown(resp[:1000] + "..." if len(resp) > 1000 else resp)
+                    
+                    is_tabular, tab_fmt = detect_tabular_content(resp)
+                    if is_tabular:
+                        csv_text = extract_tabular_text(resp, tab_fmt)
+                        xlsx_bytes = create_xlsx_from_csv_text(csv_text)
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.download_button("⬇️ .csv", csv_text, file_name=f"{safe_name}.csv", key=f"out_p_csv_{p['llm']}", use_container_width=True)
+                        with col2:
+                            if xlsx_bytes:
+                                st.download_button("⬇️ .xlsx", xlsx_bytes, file_name=f"{safe_name}.xlsx", key=f"out_p_xlsx_{p['llm']}", use_container_width=True)
+                        with col3:
+                            st.download_button("⬇️ .md", resp, file_name=f"{safe_name}.md", key=f"out_p_md_{p['llm']}", use_container_width=True)
+                        with col4:
+                            docx_p = create_docx_buffer(p['name'], resp)
+                            st.download_button("⬇️ .docx", docx_p, file_name=f"{safe_name}.docx", key=f"out_p_docx_{p['llm']}", use_container_width=True)
+                    else:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.download_button("⬇️ .md", resp, file_name=f"{safe_name}.md", key=f"out_p_md_{p['llm']}", use_container_width=True)
+                        with col2:
+                            docx_p = create_docx_buffer(p['name'], resp)
+                            st.download_button("⬇️ .docx", docx_p, file_name=f"{safe_name}.docx", key=f"out_p_docx_{p['llm']}", use_container_width=True)
+        
+        # 6. All documents saved to session
+        final_docs = get_documents(current_session_id)
+        output_docs = [d for d in final_docs if d['doc_type'] == 'output']
+        if output_docs:
+            st.markdown("#### 📁 All Saved Documents")
+            for doc in output_docs:
+                col1, col2, col3 = st.columns([4, 1, 1])
+                with col1:
+                    st.write(f"📤 {doc['name']}")
+                with col2:
+                    st.download_button("⬇️", doc['content'], file_name=doc['name'], key=f"out_doc_{doc['id']}", use_container_width=True)
+                with col3:
+                    if doc['name'].endswith(('.md', '.txt', '.csv')):
+                        docx_name = doc['name'].rsplit('.', 1)[0] + '.docx'
+                        docx_d = create_docx_buffer(doc['name'], doc['content'])
+                        st.download_button("📝", docx_d, file_name=docx_name, key=f"out_doc_docx_{doc['id']}", help="As Word", use_container_width=True)
         
         st.rerun()
