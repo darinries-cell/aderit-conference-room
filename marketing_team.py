@@ -1732,7 +1732,7 @@ if current_session_id:
                 regen_count = 0
                 for msg in messages:
                     if msg["role"] in ("participant", "merged_output", "synthesis", "deliverable") and msg.get("content"):
-                        name_hint = msg.get("persona_name", "output").replace(' ', '_').replace('/', '-')
+                        name_hint = (msg.get("persona_name") or "output").replace(' ', '_').replace('/', '-')
                         created = auto_materialize_spreadsheets(current_session_id, msg["content"], name_hint)
                         regen_count += len(created)
                 if regen_count > 0:
