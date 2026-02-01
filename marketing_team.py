@@ -1726,6 +1726,21 @@ if current_session_id:
                         st.rerun()
             st.markdown("---")
         
+        # Regenerate spreadsheets from existing messages
+        if st.button("🔄 Regenerate Spreadsheets from Messages", key="regen_xlsx", help="Scan all messages for tabular data and create downloadable .xlsx files"):
+            with st.spinner("Scanning messages for tables..."):
+                regen_count = 0
+                for msg in messages:
+                    if msg["role"] in ("participant", "merged_output", "synthesis", "deliverable") and msg.get("content"):
+                        name_hint = msg.get("persona_name", "output").replace(' ', '_').replace('/', '-')
+                        created = auto_materialize_spreadsheets(current_session_id, msg["content"], name_hint)
+                        regen_count += len(created)
+                if regen_count > 0:
+                    st.success(f"✅ Created {regen_count} file(s)! Refreshing...")
+                    st.rerun()
+                else:
+                    st.info("No tabular data found in messages.")
+        
         # Session management
         col1, col2, col3 = st.columns(3)
         with col1:
