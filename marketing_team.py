@@ -313,6 +313,127 @@ def delete_document(doc_id):
     supabase_request("DELETE", "documents", params={"id": f"eq.{doc_id}"})
 
 # ============================================
+# TEMP DATA — CHUNKED SPREADSHEET STORAGE
+# ============================================
+
+CHUNK_SIZE = 50  # rows per chunk
+
+def store_spreadsheet_chunks(session_id, file_name, content):
+    """Parse spreadsheet text content and store in chunks in temp_data table.
+    Returns metadata dict with header, total_rows, total_chunks."""
+    
+    # Clear any existing chunks for this file in this session
+    clear_temp_data(session_id, file_name)
+    
+    lines = content.strip().split('\n')
+    if not lines:
+        return None
+    
+    # Detect header (first non-empty line)
+    header = lines[0]
+    data_rows = lines[1:] if len(lines) > 1 else []
+    
+    # Filter out sheet markers and empty lines for chunking
+    clean_rows = []
+    current_sheet = ""
+    for row in data_rows:
+        if row.startswith('--- Sheet:'):
+            current_sheet = row
+            continue
+        if row.strip():
+            clean_rows.append(row)
+    
+    total_rows = len(clean_rows)
+    total_chunks = (total_rows + CHUNK_SIZE - 1) // CHUNK_SIZE if total_rows > 0 else 0
+    
+    for i in range(total_chunks):
+        start = i * CHUNK_SIZE
+        end = min(start + CHUNK_SIZE, total_rows)
+        chunk_rows = clean_rows[start:end]
+        chunk_content = "\n".join(chunk_rows)
+        
+        supabase_request("POST", "temp_data", data={
+            "session_id": session_id,
+            "file_name": file_name,
+            "chunk_index": i,
+            "total_chunks": total_chunks,
+            "header": header,
+            "row_start": start + 1,  # 1-indexed for display
+            "row_end": end,
+            "row_count": end - start,
+            "content": chunk_content
+        })
+    
+    return {
+        "header": header,
+        "total_rows": total_rows,
+        "total_chunks": total_chunks,
+        "file_name": file_name
+    }
+
+def get_temp_chunks(session_id, file_name=None, chunk_index=None):
+    """Retrieve chunks from temp_data. Can filter by file and/or chunk index."""
+    params = {
+        "select": "*",
+        "session_id": f"eq.{session_id}",
+        "order": "chunk_index.asc"
+    }
+    if file_name:
+        params["file_name"] = f"eq.{file_name}"
+    if chunk_index is not None:
+        params["chunk_index"] = f"eq.{chunk_index}"
+    
+    result = supabase_request("GET", "temp_data", params=params)
+    return result or []
+
+def get_temp_metadata(session_id):
+    """Get summary of all temp data stored for a session."""
+    chunks = get_temp_chunks(session_id)
+    if not chunks:
+        return []
+    
+    # Group by file
+    files = {}
+    for chunk in chunks:
+        fn = chunk["file_name"]
+        if fn not in files:
+            files[fn] = {
+                "file_name": fn,
+                "header": chunk["header"],
+                "total_rows": 0,
+                "total_chunks": chunk.get("total_chunks", 0),
+                "chunks": []
+            }
+        files[fn]["total_rows"] = max(files[fn]["total_rows"], chunk.get("row_end", 0))
+        files[fn]["chunks"].append(chunk["chunk_index"])
+    
+    return list(files.values())
+
+def get_chunk_for_range(session_id, file_name, start_row, end_row):
+    """Get all chunks that overlap with the given row range."""
+    chunks = get_temp_chunks(session_id, file_name)
+    result_rows = []
+    header = ""
+    for chunk in chunks:
+        header = chunk["header"]
+        c_start = chunk.get("row_start", 0)
+        c_end = chunk.get("row_end", 0)
+        # Check overlap
+        if c_start <= end_row and c_end >= start_row:
+            rows = chunk["content"].split('\n')
+            for idx, row in enumerate(rows):
+                actual_row = c_start + idx
+                if start_row <= actual_row <= end_row:
+                    result_rows.append(row)
+    return header, result_rows
+
+def clear_temp_data(session_id, file_name=None):
+    """Clear temp data for a session, optionally for a specific file."""
+    params = {"session_id": f"eq.{session_id}"}
+    if file_name:
+        params["file_name"] = f"eq.{file_name}"
+    supabase_request("DELETE", "temp_data", params=params)
+# ============================================
 # PROJECT MANAGEMENT
 # ============================================
 
@@ -361,6 +482,7 @@ def update_session(session_id, updates):
     supabase_request("PATCH", "sessions", data=updates, params={"id": f"eq.{session_id}"})
 
 def delete_session(session_id):
+    supabase_request("DELETE", "temp_data", params={"session_id": f"eq.{session_id}"})
     supabase_request("DELETE", "documents", params={"session_id": f"eq.{session_id}"})
     supabase_request("DELETE", "messages", params={"session_id": f"eq.{session_id}"})
     supabase_request("DELETE", "sessions", params={"id": f"eq.{session_id}"})
@@ -684,7 +806,8 @@ Respond with just "HIGH QUALITY" or "NEEDS RETRY: reason"
     return conversation_log
 
 def run_dispatcher_mode(user_input, participants, facilitator_llm, memory_context, session_id, status_container, documents, file_content=None):
-    """Facilitator breaks work into chunks and dispatches in parallel"""
+    """Facilitator breaks work into chunks and dispatches in parallel.
+    For large spreadsheets, pulls data from temp_data DB chunks instead of raw text."""
     
     facilitator_func = LLM_FUNCTIONS[facilitator_llm]
     
@@ -693,11 +816,38 @@ def run_dispatcher_mode(user_input, participants, facilitator_llm, memory_contex
     for p in participants:
         team_info += f"- {p['name']} ({p['llm']})\n"
     
-    # Check if we have CSV/spreadsheet data
-    is_spreadsheet = file_content and (',' in file_content[:500] or '\t' in file_content[:500])
+    # Check if we have chunked spreadsheet data in temp_data
+    temp_meta = get_temp_metadata(session_id)
+    has_db_chunks = len(temp_meta) > 0
     
-    if is_spreadsheet:
-        # Parse rows for distribution
+    # Also check raw file content as fallback
+    is_raw_spreadsheet = file_content and (',' in file_content[:500] or '\t' in file_content[:500])
+    
+    if has_db_chunks:
+        # Use DB chunks — much more efficient for large files
+        meta = temp_meta[0]  # primary spreadsheet
+        
+        dispatch_prompt = f"""{team_info}
+
+USER REQUEST: {user_input}
+
+SPREADSHEET DATA (stored in database):
+- File: {meta['file_name']}
+- Header: {meta['header']}
+- Total rows: {meta['total_rows']}
+- Available as {meta['total_chunks']} chunks of {CHUNK_SIZE} rows each
+
+Divide this work among the available workers. Assign row ranges.
+Workers will receive their chunk directly from the database.
+
+Respond in JSON format:
+{{"tasks": [
+    {{"llm": "LLM name", "start_row": 1, "end_row": {min(CHUNK_SIZE, meta['total_rows'])}, "instruction": "specific instruction"}},
+    ...
+]}}
+"""
+    elif is_raw_spreadsheet:
+        # Fallback: parse raw content (small spreadsheets not chunked)
         lines = file_content.strip().split('\n')
         header = lines[0] if lines else ""
         data_rows = lines[1:] if len(lines) > 1 else []
@@ -760,7 +910,25 @@ Respond in JSON format:
         target_llm = task.get("llm", participants[0]['llm'])
         target_participant = next((p for p in participants if p['llm'] == target_llm), participants[0])
         
-        if is_spreadsheet and "start_row" in task:
+        if has_db_chunks and "start_row" in task:
+            # Pull data from DB chunks
+            start = task.get("start_row", 1)
+            end = task.get("end_row", CHUNK_SIZE)
+            meta = temp_meta[0]
+            header, chunk_rows = get_chunk_for_range(session_id, meta['file_name'], start, end)
+            chunk_data = header + "\n" + "\n".join(chunk_rows)
+            
+            status_container.write(f"**📊 Loaded rows {start}-{end} from DB for {target_participant['name']}**")
+            
+            task_prompt = f"""TASK: {task.get('instruction', user_input)}
+
+DATA (rows {start} to {end}, pulled from database):
+{chunk_data}
+
+Process this data according to the instruction. Output your results clearly."""
+
+        elif is_raw_spreadsheet and "start_row" in task:
+            # Fallback: slice raw content
             start = task.get("start_row", 0)
             end = task.get("end_row", len(data_rows))
             chunk_rows = data_rows[start:end]
@@ -930,19 +1098,36 @@ with st.sidebar:
             if uf.name not in existing_names:
                 with st.spinner(f"Reading {uf.name}..."):
                     content = extract_text_from_file(uf)
-                    st.session_state.uploaded_files.append({"name": uf.name, "content": content})
+                    is_spreadsheet = uf.name.endswith(('.csv', '.xlsx', '.tsv'))
+                    st.session_state.uploaded_files.append({
+                        "name": uf.name, 
+                        "content": content,
+                        "is_spreadsheet": is_spreadsheet,
+                        "chunked": False
+                    })
                 st.success(f"✓ {uf.name[:25]}")
     
     if st.session_state.uploaded_files:
         for i, f in enumerate(st.session_state.uploaded_files):
             col_f, col_x = st.columns([4, 1])
             with col_f:
-                st.caption(f"📄 {f['name'][:25]}")
+                icon = "📊" if f.get("is_spreadsheet") else "📄"
+                chunk_info = " ✓ DB" if f.get("chunked") else ""
+                row_count = len(f["content"].strip().split('\n')) - 1 if f.get("is_spreadsheet") else 0
+                label = f"{icon} {f['name'][:25]}"
+                if row_count > 0:
+                    label += f" ({row_count} rows{chunk_info})"
+                st.caption(label)
             with col_x:
                 if st.button("✕", key=f"clear_file_{i}"):
+                    # Clear from temp_data if chunked
+                    if f.get("chunked") and st.session_state.current_session_id:
+                        clear_temp_data(st.session_state.current_session_id, f["name"])
                     st.session_state.uploaded_files.pop(i)
                     st.rerun()
         if st.button("✕ Clear All", key="clear_all_files"):
+            if st.session_state.current_session_id:
+                clear_temp_data(st.session_state.current_session_id)
             st.session_state.uploaded_files = []
             st.rerun()
     
@@ -1064,6 +1249,13 @@ if enabled_llms:
 if st.session_state.uploaded_files:
     file_names = ", ".join([f["name"][:20] for f in st.session_state.uploaded_files])
     st.info(f"📎 {len(st.session_state.uploaded_files)} file(s): {file_names}")
+
+# Show temp_data status if session has chunked data
+if current_session_id:
+    temp_meta = get_temp_metadata(current_session_id)
+    if temp_meta:
+        for tm in temp_meta:
+            st.success(f"📊 **{tm['file_name']}** — {tm['total_rows']} rows stored in DB ({tm['total_chunks']} chunks)")
 
 st.markdown("---")
 
@@ -1195,11 +1387,30 @@ if user_input:
         add_message(current_session_id, "user", user_input)
         
         # Save uploaded files as documents (xlsx saved as csv)
+        # Large spreadsheets get chunked into temp_data for efficient access
         all_file_content = ""
+        spreadsheet_meta = []
         for uf in st.session_state.uploaded_files:
             doc_name = get_doc_save_name(uf["name"])
             save_document(current_session_id, doc_name, uf["content"], "input")
-            all_file_content += f"## FILE: {uf['name']}\n\n{uf['content'][:8000]}\n\n---\n\n"
+            
+            if uf.get("is_spreadsheet") and len(uf["content"].strip().split('\n')) > 20:
+                # Large spreadsheet — chunk into temp_data
+                meta = store_spreadsheet_chunks(current_session_id, uf["name"], uf["content"])
+                if meta:
+                    spreadsheet_meta.append(meta)
+                    uf["chunked"] = True
+                    # Only include header + summary in context, not full data
+                    all_file_content += f"## SPREADSHEET: {uf['name']}\n"
+                    all_file_content += f"**Header:** {meta['header']}\n"
+                    all_file_content += f"**Total rows:** {meta['total_rows']}\n"
+                    all_file_content += f"**Stored in DB as {meta['total_chunks']} chunks of {CHUNK_SIZE} rows each.**\n"
+                    # Include first few rows as sample
+                    sample_lines = uf["content"].strip().split('\n')[:6]
+                    all_file_content += f"**Sample (first 5 rows):**\n{chr(10).join(sample_lines)}\n\n"
+            else:
+                # Small file or non-spreadsheet — include full content
+                all_file_content += f"## FILE: {uf['name']}\n\n{uf['content'][:8000]}\n\n---\n\n"
         
         memory_context = ""
         if all_file_content:
