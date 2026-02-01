@@ -118,6 +118,180 @@ def get_doc_save_name(original_filename):
         return original_filename.rsplit('.', 1)[0] + '.csv'
     return original_filename
 
+def create_docx_buffer(title, content, subtitle=""):
+    """Convert text/markdown content into a formatted .docx file. Returns bytes."""
+    from docx import Document as DocxDocument
+    from docx.shared import Inches, Pt, Cm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.style import WD_STYLE_TYPE
+    import io
+    
+    doc = DocxDocument()
+    
+    # Page setup - US Letter
+    for section in doc.sections:
+        section.page_width = Inches(8.5)
+        section.page_height = Inches(11)
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1)
+        section.right_margin = Inches(1)
+    
+    # Style setup
+    style = doc.styles['Normal']
+    font = style.font
+    font.name = 'Calibri'
+    font.size = Pt(11)
+    font.color.rgb = RGBColor(0x33, 0x33, 0x33)
+    style.paragraph_format.space_after = Pt(6)
+    style.paragraph_format.line_spacing = 1.15
+    
+    # Title
+    title_para = doc.add_heading(title, level=0)
+    title_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    for run in title_para.runs:
+        run.font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
+    
+    if subtitle:
+        sub = doc.add_paragraph(subtitle)
+        sub.style.font.size = Pt(12)
+        sub.style.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+    
+    # Add generation timestamp
+    from datetime import datetime
+    meta = doc.add_paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y at %I:%M %p')}")
+    meta.style.font.size = Pt(9)
+    meta.style.font.color.rgb = RGBColor(0x99, 0x99, 0x99)
+    
+    doc.add_paragraph("")  # spacer
+    
+    # Parse content - handle markdown-style formatting
+    lines = content.split('\n')
+    in_table = False
+    table_rows = []
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Skip empty lines
+        if not stripped:
+            if in_table and table_rows:
+                _flush_table(doc, table_rows)
+                table_rows = []
+                in_table = False
+            continue
+        
+        # Table detection (pipe-delimited)
+        if '|' in stripped and stripped.startswith('|') and stripped.endswith('|'):
+            # Skip separator rows like |---|---|
+            if all(c in '-| :' for c in stripped):
+                continue
+            cells = [c.strip() for c in stripped.split('|')[1:-1]]
+            table_rows.append(cells)
+            in_table = True
+            continue
+        
+        # Flush any pending table
+        if in_table and table_rows:
+            _flush_table(doc, table_rows)
+            table_rows = []
+            in_table = False
+        
+        # Headings
+        if stripped.startswith('#### '):
+            doc.add_heading(stripped[5:], level=4)
+        elif stripped.startswith('### '):
+            doc.add_heading(stripped[4:], level=3)
+        elif stripped.startswith('## '):
+            doc.add_heading(stripped[3:], level=2)
+        elif stripped.startswith('# '):
+            doc.add_heading(stripped[2:], level=1)
+        # Bullet points
+        elif stripped.startswith('- ') or stripped.startswith('* '):
+            para = doc.add_paragraph(stripped[2:], style='List Bullet')
+        # Numbered lists
+        elif len(stripped) > 2 and stripped[0].isdigit() and stripped[1] in '.):' :
+            text = stripped.split(' ', 1)[1] if ' ' in stripped else stripped
+            para = doc.add_paragraph(text, style='List Number')
+        elif len(stripped) > 3 and stripped[:2].isdigit() and stripped[2] in '.):':
+            text = stripped.split(' ', 1)[1] if ' ' in stripped else stripped
+            para = doc.add_paragraph(text, style='List Number')
+        # Horizontal rule
+        elif stripped in ('---', '***', '___'):
+            doc.add_paragraph('_' * 50)
+        # Bold line (treat as sub-heading)
+        elif stripped.startswith('**') and stripped.endswith('**'):
+            para = doc.add_paragraph()
+            run = para.add_run(stripped.strip('*').strip())
+            run.bold = True
+            run.font.size = Pt(12)
+        # Regular paragraph with inline formatting
+        else:
+            para = doc.add_paragraph()
+            _add_formatted_text(para, stripped)
+    
+    # Flush final table
+    if table_rows:
+        _flush_table(doc, table_rows)
+    
+    # Save to buffer
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+def _flush_table(doc, rows):
+    """Add a table to the document from parsed rows."""
+    from docx.shared import Pt, Inches, RGBColor
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    
+    if not rows:
+        return
+    
+    num_cols = max(len(r) for r in rows)
+    table = doc.add_table(rows=len(rows), cols=num_cols)
+    table.style = 'Light Grid Accent 1'
+    table.alignment = WD_TABLE_ALIGNMENT.LEFT
+    
+    for i, row_data in enumerate(rows):
+        row = table.rows[i]
+        for j, cell_text in enumerate(row_data):
+            if j < num_cols:
+                cell = row.cells[j]
+                cell.text = cell_text
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        run.font.size = Pt(10)
+                        if i == 0:
+                            run.bold = True
+    
+    doc.add_paragraph("")  # spacer after table
+
+def _add_formatted_text(para, text):
+    """Parse inline markdown formatting and add runs to paragraph."""
+    import re as _re
+    # Split on bold and italic markers
+    parts = _re.split(r'(\*\*\*.*?\*\*\*|\*\*.*?\*\*|\*.*?\*|`.*?`)', text)
+    for part in parts:
+        if part.startswith('***') and part.endswith('***'):
+            run = para.add_run(part[3:-3])
+            run.bold = True
+            run.italic = True
+        elif part.startswith('**') and part.endswith('**'):
+            run = para.add_run(part[2:-2])
+            run.bold = True
+        elif part.startswith('*') and part.endswith('*') and len(part) > 2:
+            run = para.add_run(part[1:-1])
+            run.italic = True
+        elif part.startswith('`') and part.endswith('`'):
+            run = para.add_run(part[1:-1])
+            run.font.name = 'Consolas'
+            from docx.shared import Pt, RGBColor
+            run.font.size = Pt(10)
+            run.font.color.rgb = RGBColor(0xc7, 0x25, 0x4e)
+        else:
+            para.add_run(part)
+
 def get_documents(session_id):
     result = supabase_request("GET", "documents", params={
         "select": "*",
@@ -866,12 +1040,18 @@ if current_session_id:
     if documents:
         with st.expander(f"📁 Documents ({len(documents)})", expanded=False):
             for doc in documents:
-                col1, col2, col3 = st.columns([3, 1, 1])
+                col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
                 with col1:
                     st.write(f"{'📥' if doc['doc_type'] == 'input' else '📤'} {doc['name']}")
                 with col2:
                     st.download_button("⬇️", doc['content'], file_name=doc['name'], key=f"dl_{doc['id']}")
                 with col3:
+                    # Offer docx conversion for text-based documents
+                    if doc['name'].endswith(('.md', '.txt', '.csv')) or doc['doc_type'] == 'output':
+                        docx_name = doc['name'].rsplit('.', 1)[0] + '.docx' if '.' in doc['name'] else doc['name'] + '.docx'
+                        docx_bytes = create_docx_buffer(doc['name'], doc['content'])
+                        st.download_button("📝", docx_bytes, file_name=docx_name, key=f"dl_docx_{doc['id']}", help="Download as Word")
+                with col4:
                     if st.button("🗑️", key=f"del_doc_{doc['id']}"):
                         delete_document(doc['id'])
                         st.rerun()
@@ -889,21 +1069,45 @@ if current_session_id:
         elif msg["role"] == "participant":
             with st.expander(f"{msg.get('persona_emoji', '👤')} {msg.get('persona_name', 'Unknown')} ({msg.get('llm_name', '?')})", expanded=False):
                 st.markdown(msg["content"])
+                safe_name = (msg.get('persona_name', 'output') or 'output').replace(' ', '_').replace('/', '-')
+                col_p1, col_p2 = st.columns(2)
+                with col_p1:
+                    st.download_button("⬇️ .md", msg["content"], file_name=f"{safe_name}.md", key=f"dl_part_md_{msg['id']}")
+                with col_p2:
+                    docx_bytes = create_docx_buffer(msg.get('persona_name', 'Output'), msg["content"])
+                    st.download_button("⬇️ .docx", docx_bytes, file_name=f"{safe_name}.docx", key=f"dl_part_docx_{msg['id']}")
         elif msg["role"] == "synthesis":
             st.markdown("### 📋 Synthesis")
             st.markdown(msg["content"])
             synthesis_content = msg["content"]
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                st.download_button("⬇️ .md", msg["content"], file_name="synthesis.md", key=f"dl_synth_md_{msg['id']}")
+            with col_s2:
+                docx_bytes = create_docx_buffer("Synthesis", msg["content"])
+                st.download_button("⬇️ .docx", docx_bytes, file_name="synthesis.docx", key=f"dl_synth_docx_{msg['id']}")
         elif msg["role"] == "decisions":
             st.markdown("### 🔑 Key Decisions")
             st.markdown(msg["content"])
         elif msg["role"] == "deliverable":
             st.markdown(f"### 📄 {msg.get('persona_name', 'Deliverable')}")
             st.markdown(msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"])
-            st.download_button("⬇️ Download", msg["content"], file_name=f"{msg.get('persona_name', 'output')}.md", key=f"dl_msg_{msg['id']}")
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                st.download_button("⬇️ .md", msg["content"], file_name=f"{msg.get('persona_name', 'output')}.md", key=f"dl_msg_md_{msg['id']}")
+            with col_d2:
+                docx_bytes = create_docx_buffer(msg.get('persona_name', 'Deliverable'), msg["content"])
+                fname = msg.get('persona_name', 'output').replace('.md', '') + '.docx'
+                st.download_button("⬇️ .docx", docx_bytes, file_name=fname, key=f"dl_msg_docx_{msg['id']}", type="primary")
         elif msg["role"] == "merged_output":
             st.markdown("### 📤 Merged Output")
             st.markdown(msg["content"][:2000] + "..." if len(msg["content"]) > 2000 else msg["content"])
-            st.download_button("⬇️ Download Full Output", msg["content"], file_name="merged_output.md", key=f"dl_merged_{msg['id']}", type="primary")
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                st.download_button("⬇️ .md", msg["content"], file_name="merged_output.md", key=f"dl_merged_md_{msg['id']}")
+            with col_m2:
+                docx_bytes = create_docx_buffer("Merged Output", msg["content"])
+                st.download_button("⬇️ .docx", docx_bytes, file_name="merged_output.docx", key=f"dl_merged_docx_{msg['id']}", type="primary")
     
     if messages:
         st.markdown("---")
@@ -1022,6 +1226,45 @@ if user_input:
             key_decisions = ask_claude(decisions_prompt, "Extract key decisions.", None)
             add_message(current_session_id, "decisions", key_decisions)
             
+            # Build full report markdown
+            report_md = f"# {user_input}\n\n"
+            report_md += f"**Date:** {datetime.now().strftime('%B %d, %Y')}\n"
+            report_md += f"**Mode:** {mode}\n"
+            report_md += f"**Participants:** {', '.join([p['name'] for p in participants])}\n\n"
+            report_md += "---\n\n"
+            report_md += f"## Synthesis\n\n{synthesis}\n\n"
+            report_md += f"## Key Decisions\n\n{key_decisions}\n\n"
+            
+            # Save individual participant outputs as .md files
+            if mode == "panel":
+                report_md += "---\n\n## Participant Responses\n\n"
+                last_round = st.session_state.num_rounds
+                for p in participants:
+                    resp = all_responses.get(last_round, {}).get(p['llm'], '')
+                    if resp:
+                        participant_md = f"# {p['name']} — {p['emoji']}\n\n"
+                        participant_md += f"**Role:** {p['description'][:200]}\n\n"
+                        participant_md += f"**Topic:** {user_input}\n\n---\n\n{resp}"
+                        safe_name = p['name'].replace(' ', '_').replace('/', '-')
+                        save_document(current_session_id, f"{safe_name}.md", participant_md, "output")
+                        report_md += f"### {p['emoji']} {p['name']}\n\n{resp}\n\n"
+            elif mode == "dispatcher":
+                report_md += "---\n\n## Merged Output\n\n" + merged_result + "\n\n"
+                report_md += "## Individual Worker Results\n\n"
+                for r in results:
+                    worker_md = f"# {r['name']} — Worker Output\n\n"
+                    worker_md += f"**Topic:** {user_input}\n\n---\n\n{r['result']}"
+                    safe_name = r['name'].replace(' ', '_').replace('/', '-')
+                    save_document(current_session_id, f"{safe_name}.md", worker_md, "output")
+                    report_md += f"### {r['name']}\n\n{r['result']}\n\n"
+            else:  # conversational
+                report_md += "---\n\n## Conversation Log\n\n"
+                for entry in conversation_log:
+                    report_md += f"{entry}\n\n"
+            
+            # Save full report as .md
+            save_document(current_session_id, "report.md", report_md, "output")
+            
             # Check for file request
             if any(kw in user_input.lower() for kw in ["create a file", "create a markdown", "generate a file", "write a file", "create a prompt"]):
                 st.write("**Generating deliverable...**")
@@ -1044,11 +1287,26 @@ if user_input:
         if mode == "dispatcher":
             st.markdown("### 📤 Merged Output")
             st.markdown(merged_result[:2000] + "..." if len(merged_result) > 2000 else merged_result)
-            st.download_button("⬇️ Download Full Output", merged_result, file_name="merged_output.md", key="dl_merged_new", type="primary")
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button("⬇️ Download .md", merged_result, file_name="merged_output.md", key="dl_merged_md_new", type="primary")
+            with col_dl2:
+                docx_bytes = create_docx_buffer("Merged Output", merged_result, subtitle=user_input[:100])
+                st.download_button("⬇️ Download .docx", docx_bytes, file_name="merged_output.docx", key="dl_merged_docx_new", type="secondary")
         
         st.markdown("### 📋 Synthesis")
         st.markdown(synthesis)
         st.markdown("### 🔑 Key Decisions")
         st.markdown(key_decisions)
+        
+        # Full report downloads — .md and .docx
+        st.markdown("---")
+        st.markdown("### 📄 Full Report")
+        col_r1, col_r2 = st.columns(2)
+        with col_r1:
+            st.download_button("⬇️ Report (.md)", report_md, file_name="report.md", key="dl_report_md", type="primary")
+        with col_r2:
+            docx_report = create_docx_buffer(user_input[:80], report_md, subtitle="Aderit Conference Room Report")
+            st.download_button("⬇️ Report (.docx)", docx_report, file_name="report.docx", key="dl_report_docx", type="primary")
         
         st.rerun()
