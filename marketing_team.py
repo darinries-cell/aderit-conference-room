@@ -292,6 +292,181 @@ def _add_formatted_text(para, text):
         else:
             para.add_run(part)
 
+# ============================================
+# AUTO-MATERIALIZE SPREADSHEETS FROM LLM OUTPUT
+# ============================================
+
+def auto_materialize_spreadsheets(session_id, content, base_name="output"):
+    """Detect tabular data in LLM response and create real .xlsx + .csv files in documents.
+    Returns list of (filename, bytes, mime) tuples that were created."""
+    created_files = []
+    
+    is_tabular, tab_fmt = detect_tabular_content(content)
+    if not is_tabular:
+        return created_files
+    
+    # Look for a filename the LLM mentioned (e.g. "Aderit_Agent_Catalog.xlsx")
+    import re as _re
+    file_ref = _re.search(r'([\w][\w\-\s]*\.xlsx)', content)
+    if file_ref:
+        base_name = file_ref.group(1).replace('.xlsx', '').replace(' ', '_')
+    
+    # Extract all table sections
+    table_blocks = _extract_all_tables(content)
+    
+    if table_blocks:
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            import io
+            
+            wb = openpyxl.Workbook()
+            wb.remove(wb.active)
+            
+            for idx, (sheet_name, csv_block) in enumerate(table_blocks):
+                safe_sheet = _re.sub(r'[\\/*?:\[\]]', '', sheet_name)[:31]
+                if not safe_sheet:
+                    safe_sheet = f"Sheet{idx+1}"
+                ws = wb.create_sheet(title=safe_sheet)
+                
+                lines = csv_block.strip().split('\n')
+                for row_idx, line in enumerate(lines, 1):
+                    cells = line.split(',')
+                    for col_idx, cell_val in enumerate(cells, 1):
+                        val = cell_val.strip().strip('"')
+                        try:
+                            if '.' in val:
+                                val = float(val)
+                            else:
+                                val = int(val)
+                        except (ValueError, TypeError):
+                            pass
+                        ws.cell(row=row_idx, column=col_idx, value=val)
+                    
+                    if row_idx == 1:
+                        for col_idx in range(1, len(cells) + 1):
+                            c = ws.cell(row=1, column=col_idx)
+                            c.font = Font(bold=True, color="FFFFFF")
+                            c.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                            c.alignment = Alignment(horizontal="center")
+                
+                for col in ws.columns:
+                    max_len = 0
+                    col_letter = col[0].column_letter
+                    for c in col:
+                        if c.value:
+                            max_len = max(max_len, len(str(c.value)))
+                    ws.column_dimensions[col_letter].width = min(max_len + 3, 50)
+            
+            xlsx_buf = io.BytesIO()
+            wb.save(xlsx_buf)
+            xlsx_buf.seek(0)
+            xlsx_bytes = xlsx_buf.getvalue()
+            
+            xlsx_name = f"{base_name}.xlsx"
+            # Store as base64 in document repo since content column is text
+            import base64
+            xlsx_b64 = base64.b64encode(xlsx_bytes).decode('utf-8')
+            save_document(session_id, xlsx_name, xlsx_b64, "output")
+            created_files.append((xlsx_name, xlsx_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+            
+        except Exception:
+            pass
+    
+    # Also save CSV
+    csv_text = extract_tabular_text(content, tab_fmt)
+    if csv_text:
+        csv_name = f"{base_name}.csv"
+        save_document(session_id, csv_name, csv_text, "output")
+        created_files.append((csv_name, csv_text.encode('utf-8') if isinstance(csv_text, str) else csv_text, "text/csv"))
+    
+    return created_files
+
+def _extract_all_tables(content):
+    """Extract all tabular sections from LLM content. Returns list of (sheet_name, csv_text) tuples."""
+    import re as _re
+    
+    blocks = []
+    lines = content.split('\n')
+    current_heading = "Sheet1"
+    current_table_lines = []
+    in_table = False
+    table_fmt = None
+    
+    for line in lines:
+        header_match = _re.match(r'^#{1,3}\s+(.+)', line.strip())
+        if header_match:
+            if current_table_lines:
+                csv_text = _table_lines_to_csv(current_table_lines, table_fmt)
+                if csv_text:
+                    blocks.append((current_heading, csv_text))
+                current_table_lines = []
+                in_table = False
+                table_fmt = None
+            current_heading = header_match.group(1).strip()[:31]
+            continue
+        
+        stripped = line.strip()
+        
+        # Pipe table
+        if stripped.startswith('|') and stripped.endswith('|') and '|' in stripped[1:-1]:
+            if all(c in '-| :' for c in stripped):
+                continue
+            in_table = True
+            table_fmt = "pipe"
+            current_table_lines.append(stripped)
+            continue
+        
+        # CSV-like
+        comma_count = stripped.count(',')
+        word_count = len(stripped.split())
+        if comma_count >= 2 and not stripped.startswith('#') and not stripped.startswith('**') and not stripped.startswith('- '):
+            if (comma_count / max(word_count, 1)) > 0.15:
+                if not in_table:
+                    table_fmt = "csv"
+                    in_table = True
+                if table_fmt == "csv":
+                    current_table_lines.append(stripped)
+                    continue
+        
+        # End of table
+        if in_table and stripped == "":
+            continue
+        elif in_table:
+            csv_text = _table_lines_to_csv(current_table_lines, table_fmt)
+            if csv_text:
+                blocks.append((current_heading, csv_text))
+            current_table_lines = []
+            in_table = False
+            table_fmt = None
+    
+    if current_table_lines:
+        csv_text = _table_lines_to_csv(current_table_lines, table_fmt)
+        if csv_text:
+            blocks.append((current_heading, csv_text))
+    
+    if not blocks:
+        is_tab, fmt = detect_tabular_content(content)
+        if is_tab:
+            csv_text = extract_tabular_text(content, fmt)
+            if csv_text:
+                blocks.append(("Sheet1", csv_text))
+    
+    return blocks
+
+def _table_lines_to_csv(lines, fmt):
+    """Convert table lines to CSV text."""
+    if not lines or len(lines) < 2:
+        return None
+    if fmt == "pipe":
+        csv_lines = []
+        for line in lines:
+            cells = [c.strip() for c in line.split('|')[1:-1]]
+            csv_lines.append(','.join(cells))
+        return '\n'.join(csv_lines)
+    else:
+        return '\n'.join(lines)
+
 def detect_tabular_content(text):
     """Check if text contains CSV-like or pipe-table content that should be offered as spreadsheet."""
     lines = text.strip().split('\n')
@@ -1514,12 +1689,32 @@ if current_session_id:
         output_docs = [d for d in all_docs if d['doc_type'] == 'output']
         if output_docs:
             st.markdown("## 📦 All Outputs")
-            for doc in output_docs:
+            
+            # Show spreadsheets first with prominent styling
+            xlsx_docs = [d for d in output_docs if d['name'].endswith('.xlsx')]
+            other_docs = [d for d in output_docs if not d['name'].endswith('.xlsx')]
+            
+            if xlsx_docs:
+                st.markdown("#### 📊 Spreadsheets")
+                for doc in xlsx_docs:
+                    try:
+                        import base64
+                        xlsx_bytes = base64.b64decode(doc['content'])
+                        st.download_button(f"⬇️ {doc['name']}", xlsx_bytes, file_name=doc['name'], 
+                                          key=f"hist_dl_{doc['id']}", type="primary", use_container_width=True,
+                                          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    except Exception:
+                        st.download_button(f"⬇️ {doc['name']}", doc['content'], file_name=doc['name'], 
+                                          key=f"hist_dl_{doc['id']}", use_container_width=True)
+            
+            if other_docs:
+                st.markdown("#### 📄 Documents")
+            for doc in other_docs:
                 col1, col2, col3, col4 = st.columns([4, 1, 1, 1])
                 with col1:
                     st.write(f"📤 **{doc['name']}**")
                 with col2:
-                    st.download_button("⬇️ Raw", doc['content'], file_name=doc['name'], key=f"hist_dl_{doc['id']}", use_container_width=True)
+                    st.download_button("⬇️", doc['content'], file_name=doc['name'], key=f"hist_dl_{doc['id']}", use_container_width=True)
                 with col3:
                     if doc['name'].endswith(('.md', '.txt', '.csv')):
                         docx_name = doc['name'].rsplit('.', 1)[0] + '.docx'
@@ -1704,6 +1899,34 @@ if user_input:
             # Save full report as .md
             save_document(current_session_id, "report.md", report_md, "output")
             
+            # AUTO-MATERIALIZE: scan all LLM outputs for tabular data and create real spreadsheets
+            materialized_files = []
+            
+            # Check merged output (dispatcher)
+            if mode == "dispatcher" and merged_result:
+                mf = auto_materialize_spreadsheets(current_session_id, merged_result, "merged_output")
+                materialized_files.extend(mf)
+            
+            # Check each participant's output
+            if mode == "panel":
+                last_round = st.session_state.num_rounds
+                for p in participants:
+                    resp = all_responses.get(last_round, {}).get(p['llm'], '')
+                    if resp:
+                        safe_name = p['name'].replace(' ', '_').replace('/', '-')
+                        mf = auto_materialize_spreadsheets(current_session_id, resp, safe_name)
+                        materialized_files.extend(mf)
+            elif mode == "dispatcher":
+                for r in results:
+                    safe_name = r['name'].replace(' ', '_').replace('/', '-')
+                    mf = auto_materialize_spreadsheets(current_session_id, r['result'], safe_name)
+                    materialized_files.extend(mf)
+            
+            # Check synthesis too
+            if synthesis:
+                mf = auto_materialize_spreadsheets(current_session_id, synthesis, "synthesis_data")
+                materialized_files.extend(mf)
+            
             # Check for file request
             if any(kw in user_input.lower() for kw in ["create a file", "create a markdown", "generate a file", "write a file", "create a prompt"]):
                 st.write("**Generating deliverable...**")
@@ -1727,6 +1950,18 @@ if user_input:
         # ============================================
         st.markdown("---")
         st.markdown("## 📦 All Outputs")
+        
+        # 0. Auto-materialized spreadsheets (most likely what user is looking for)
+        if materialized_files:
+            st.markdown("#### 📊 Generated Spreadsheets")
+            for fname, fbytes, fmime in materialized_files:
+                if fname.endswith('.xlsx'):
+                    st.download_button(f"⬇️ {fname}", fbytes, file_name=fname, key=f"out_mat_{fname}", 
+                                      type="primary", use_container_width=True,
+                                      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                elif fname.endswith('.csv'):
+                    st.download_button(f"⬇️ {fname}", fbytes, file_name=fname, key=f"out_mat_{fname}",
+                                      use_container_width=True, mime="text/csv")
         
         # 1. Full Report
         st.markdown("#### 📄 Full Report")
