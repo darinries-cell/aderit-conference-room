@@ -1649,10 +1649,10 @@ if current_session_id:
             st.markdown(msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"])
             col_d1, col_d2 = st.columns(2)
             with col_d1:
-                st.download_button("⬇️ .md", msg["content"], file_name=f"{msg.get('persona_name', 'output')}.md", key=f"dl_msg_md_{msg['id']}")
+                st.download_button("⬇️ .md", msg["content"], file_name=f"{(msg.get('persona_name') or 'output')}.md", key=f"dl_msg_md_{msg['id']}")
             with col_d2:
-                docx_bytes = create_docx_buffer(msg.get('persona_name', 'Deliverable'), msg["content"])
-                fname = msg.get('persona_name', 'output').replace('.md', '') + '.docx'
+                docx_bytes = create_docx_buffer((msg.get('persona_name') or 'Deliverable'), msg["content"])
+                fname = (msg.get('persona_name') or 'output').replace('.md', '') + '.docx'
                 st.download_button("⬇️ .docx", docx_bytes, file_name=fname, key=f"dl_msg_docx_{msg['id']}", type="primary")
         elif msg["role"] == "merged_output":
             st.markdown("### 📤 Merged Output")
