@@ -668,10 +668,8 @@ if "enabled_llms" not in st.session_state:
     st.session_state.enabled_llms = LLM_LIST.copy()
 if "num_rounds" not in st.session_state:
     st.session_state.num_rounds = 5
-if "file_context" not in st.session_state:
-    st.session_state.file_context = ""
-if "uploaded_filename" not in st.session_state:
-    st.session_state.uploaded_filename = ""
+if "uploaded_files" not in st.session_state:
+    st.session_state.uploaded_files = []  # list of {"name": ..., "content": ...}
 if "discussion_mode" not in st.session_state:
     st.session_state.discussion_mode = "panel"
 if "facilitator_llm" not in st.session_state:
@@ -719,21 +717,28 @@ with st.sidebar:
     
     # File upload - supports xlsx
     st.markdown("### 📎 Upload")
-    uploaded_file = st.file_uploader("Add file", type=['txt', 'md', 'csv', 'pdf', 'docx', 'xlsx'], key="file_uploader", label_visibility="collapsed")
+    uploaded_files = st.file_uploader("Add files", type=['txt', 'md', 'csv', 'pdf', 'docx', 'xlsx'], key="file_uploader", label_visibility="collapsed", accept_multiple_files=True)
     
-    if uploaded_file:
-        if uploaded_file.name != st.session_state.uploaded_filename:
-            with st.spinner("Reading..."):
-                content = extract_text_from_file(uploaded_file)
-                st.session_state.file_context = content
-                st.session_state.uploaded_filename = uploaded_file.name
-            st.success(f"✓ {uploaded_file.name[:20]}")
+    if uploaded_files:
+        existing_names = {f["name"] for f in st.session_state.uploaded_files}
+        for uf in uploaded_files:
+            if uf.name not in existing_names:
+                with st.spinner(f"Reading {uf.name}..."):
+                    content = extract_text_from_file(uf)
+                    st.session_state.uploaded_files.append({"name": uf.name, "content": content})
+                st.success(f"✓ {uf.name[:25]}")
     
-    if st.session_state.file_context:
-        st.caption(f"📄 {st.session_state.uploaded_filename[:20]}")
-        if st.button("✕ Clear", key="clear_file"):
-            st.session_state.file_context = ""
-            st.session_state.uploaded_filename = ""
+    if st.session_state.uploaded_files:
+        for i, f in enumerate(st.session_state.uploaded_files):
+            col_f, col_x = st.columns([4, 1])
+            with col_f:
+                st.caption(f"📄 {f['name'][:25]}")
+            with col_x:
+                if st.button("✕", key=f"clear_file_{i}"):
+                    st.session_state.uploaded_files.pop(i)
+                    st.rerun()
+        if st.button("✕ Clear All", key="clear_all_files"):
+            st.session_state.uploaded_files = []
             st.rerun()
     
     st.markdown("---")
@@ -846,8 +851,9 @@ if enabled_llms:
     room_display = " | ".join([f"{roles.get(room_assignments.get(llm, ''), {}).get('emoji', '👤')} {roles.get(room_assignments.get(llm, ''), {}).get('name', '?')[:12]}" for llm in enabled_llms])
     st.caption(f"**Mode:** {mode_display} · **Room:** {room_display}")
 
-if st.session_state.file_context:
-    st.info(f"📎 {st.session_state.uploaded_filename}")
+if st.session_state.uploaded_files:
+    file_names = ", ".join([f["name"][:20] for f in st.session_state.uploaded_files])
+    st.info(f"📎 {len(st.session_state.uploaded_files)} file(s): {file_names}")
 
 st.markdown("---")
 
@@ -948,15 +954,16 @@ if user_input:
         
         add_message(current_session_id, "user", user_input)
         
-        # Save uploaded file as document (xlsx saved as csv)
-        file_context = st.session_state.file_context
-        if file_context:
-            doc_name = get_doc_save_name(st.session_state.uploaded_filename)
-            save_document(current_session_id, doc_name, file_context, "input")
+        # Save uploaded files as documents (xlsx saved as csv)
+        all_file_content = ""
+        for uf in st.session_state.uploaded_files:
+            doc_name = get_doc_save_name(uf["name"])
+            save_document(current_session_id, doc_name, uf["content"], "input")
+            all_file_content += f"## FILE: {uf['name']}\n\n{uf['content'][:8000]}\n\n---\n\n"
         
         memory_context = ""
-        if file_context:
-            memory_context = f"## UPLOADED FILE ({st.session_state.uploaded_filename}):\n\n{file_context[:8000]}\n\n"
+        if all_file_content:
+            memory_context = f"## UPLOADED FILES:\n\n{all_file_content}\n\n"
         
         # Build participants
         participants = []
@@ -995,7 +1002,7 @@ if user_input:
             else:  # dispatcher
                 results, merged_result = run_dispatcher_mode(
                     user_input, participants, st.session_state.facilitator_llm,
-                    memory_context, current_session_id, st, documents, file_context
+                    memory_context, current_session_id, st, documents, all_file_content if all_file_content else None
                 )
                 previous_text = merged_result
                 final_responses = {r['llm']: r['result'] for r in results}
