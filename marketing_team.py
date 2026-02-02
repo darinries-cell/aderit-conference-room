@@ -1357,6 +1357,10 @@ if "discussion_mode" not in st.session_state:
     st.session_state.discussion_mode = "panel"
 if "facilitator_llm" not in st.session_state:
     st.session_state.facilitator_llm = "Claude"
+if "ftd_export_mode" not in st.session_state:
+    st.session_state.ftd_export_mode = False
+if "ftd_json_output" not in st.session_state:
+    st.session_state.ftd_json_output = None
 
 roles = load_roles_from_db()
 room_assignments = load_room_assignments()
@@ -1395,6 +1399,12 @@ with st.sidebar:
     
     if st.session_state.discussion_mode == "panel":
         st.session_state.num_rounds = st.slider("Rounds", 1, 5, st.session_state.num_rounds)
+    
+    st.session_state.ftd_export_mode = st.checkbox(
+        "📦 FTD Export",
+        value=st.session_state.ftd_export_mode,
+        help="After discussion, auto-generate structured FTD JSON for document assembly"
+    )
     
     st.markdown("---")
     
@@ -1875,6 +1885,100 @@ if user_input:
             key_decisions = ask_claude(decisions_prompt, "Extract key decisions.", None)
             add_message(current_session_id, "decisions", key_decisions)
             
+            # ── FTD EXPORT (if enabled) ─────────────────────────────────
+            ftd_json_str = None
+            if st.session_state.ftd_export_mode:
+                st.write("**📦 Generating FTD export...**")
+                
+                ftd_export_system = """You are the FTD Export Formatter for Aderit's enterprise sales documents.
+Your ONLY job: take this completed Conference Room discussion and restructure it into strict JSON.
+
+RULES:
+- Output ONLY valid JSON. No markdown. No explanation. No code fences.
+- EXTRACT and RESTRUCTURE what participants produced. Do NOT invent content.
+- Every genome_dependency must have capability, usage, and criticality (Required/Enhancing/Optional)
+- Every source_system_mapping must name SPECIFIC systems (Workday HCM, not 'HRIS')
+- problem_statement.buyer_pain_narrative must sound like a real buyer, not a vendor
+- key_metrics must have 3-6 items with metric, value, and context
+- quantified_benefits must have 3+ items with benefit, annual_value, and calculation_basis
+- If a field cannot be filled from the discussion, use '[REQUIRES REVIEW]' as the value
+- Add 'export_warnings' array at top level listing anything that needs human review"""
+                
+                ftd_export_prompt = f"""{ftd_export_system}
+
+DISCUSSION TOPIC: {user_input}
+DATE: {datetime.now().strftime('%Y-%m-%d')}
+PARTICIPANTS: {', '.join([p['name'] for p in participants])}
+
+SYNTHESIS:
+{synthesis}
+
+KEY DECISIONS:
+{key_decisions}
+
+FULL DISCUSSION TRANSCRIPT:
+{previous_text[:18000]}
+
+---
+Restructure ALL content into FTD JSON with these top-level keys:
+meta, executive_summary, problem_statement, agent_architecture, data_requirements, regulatory_compliance, implementation_roadmap, business_case, competitive_differentiation, go_to_market, demo_concept, cross_agent_intelligence, appendix
+
+Output ONLY valid JSON now."""
+
+                ftd_raw = ask_claude(ftd_export_prompt, ftd_export_system, None)
+                
+                # Parse JSON (strip code fences if present)
+                import re as _re
+                ftd_cleaned = ftd_raw.strip()
+                if ftd_cleaned.startswith("```"):
+                    ftd_cleaned = _re.sub(r'^```(?:json)?\s*\n?', '', ftd_cleaned)
+                    ftd_cleaned = _re.sub(r'\n?```\s*$', '', ftd_cleaned)
+                
+                try:
+                    ftd_data = json.loads(ftd_cleaned)
+                    ftd_json_str = json.dumps(ftd_data, indent=2, ensure_ascii=False)
+                    st.session_state.ftd_json_output = ftd_json_str
+                    
+                    # Save to documents
+                    save_document(current_session_id, "ftd_export.json", ftd_json_str, "output")
+                    add_message(current_session_id, "ftd_export", 
+                               f"📦 FTD JSON exported ({len(ftd_json_str):,} chars). Download below.",
+                               persona_name="FTD Export", persona_emoji="📦")
+                    
+                    # Quality check
+                    warnings = ftd_data.get("export_warnings", [])
+                    review_count = ftd_json_str.count("REQUIRES REVIEW")
+                    required = ["meta", "executive_summary", "problem_statement", "agent_architecture",
+                                "data_requirements", "regulatory_compliance", "implementation_roadmap",
+                                "business_case", "competitive_differentiation", "go_to_market",
+                                "demo_concept", "cross_agent_intelligence"]
+                    present = [s for s in required if s in ftd_data]
+                    
+                    st.write(f"✅ **FTD Export:** {len(present)}/{len(required)} sections, "
+                            f"{len(ftd_json_str):,} chars"
+                            + (f", ⚠️ {len(warnings)} warnings" if warnings else "")
+                            + (f", 🔍 {review_count} review items" if review_count else ""))
+                    
+                except json.JSONDecodeError as je:
+                    st.warning(f"⚠️ FTD JSON parse error: {je}. Attempting repair...")
+                    repair_prompt = f"Fix this invalid JSON and return ONLY valid JSON:\n\nError: {je}\n\n{ftd_cleaned[:15000]}"
+                    repaired = ask_claude(repair_prompt, "Output only valid JSON.", None)
+                    repaired = repaired.strip()
+                    if repaired.startswith("```"):
+                        repaired = _re.sub(r'^```(?:json)?\s*\n?', '', repaired)
+                        repaired = _re.sub(r'\n?```\s*$', '', repaired)
+                    try:
+                        ftd_data = json.loads(repaired)
+                        ftd_json_str = json.dumps(ftd_data, indent=2, ensure_ascii=False)
+                        st.session_state.ftd_json_output = ftd_json_str
+                        save_document(current_session_id, "ftd_export.json", ftd_json_str, "output")
+                        st.write("✅ **FTD Export:** JSON repaired and saved")
+                    except json.JSONDecodeError:
+                        ftd_json_str = ftd_raw  # save raw for manual fix
+                        st.session_state.ftd_json_output = ftd_json_str
+                        save_document(current_session_id, "ftd_export_RAW.txt", ftd_raw, "output")
+                        st.error("❌ FTD JSON repair failed — raw output saved for manual fix")
+            
             # Build full report markdown
             report_md = f"# {user_input}\n\n"
             report_md += f"**Date:** {datetime.now().strftime('%B %d, %Y')}\n"
@@ -1965,6 +2069,27 @@ if user_input:
         # ============================================
         st.markdown("---")
         st.markdown("## 📦 All Outputs")
+        
+        # FTD Export (if enabled and generated)
+        if st.session_state.ftd_export_mode and ftd_json_str:
+            st.markdown("#### 📦 FTD Export Package")
+            agent_slug = user_input.lower().replace(' ', '_')[:40]
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "⬇️ ftd_export.json", 
+                    ftd_json_str, 
+                    file_name=f"ftd_{agent_slug}.json",
+                    key="out_ftd_json",
+                    type="primary",
+                    use_container_width=True,
+                    mime="application/json"
+                )
+            with col2:
+                st.caption(f"Feed this into build_ftd.js → .docx")
+            
+            with st.expander("🔍 Preview FTD JSON", expanded=False):
+                st.json(json.loads(ftd_json_str) if isinstance(ftd_json_str, str) else ftd_json_str)
         
         # 0. Auto-materialized spreadsheets (most likely what user is looking for)
         if materialized_files:
